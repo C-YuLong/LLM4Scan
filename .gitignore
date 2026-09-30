@@ -1,0 +1,15 @@
+accounts.txt
+.env
+.env.*
+!.env.example
+*.pyc
+*.pyo
+.venv/
+venv/
+__pycache__/
+dev/results/
+official/
+*.zip
+*.tar
+*.tar.gz
+*.oci

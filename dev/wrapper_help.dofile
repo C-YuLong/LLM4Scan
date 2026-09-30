@@ -1,0 +1,5 @@
+load_lib /input/lib/sky130.lib
+load_netlist [list /input/netlist/des_perf.v /input/netlist/dedicated_wrp_cell.v]
+present_design des3
+add_dedicated_wrapper_cell_type -design_name dedicated_wrp_cell -interface {shift_clk my_shift_clk h capture_en my_capture_en h shift_en my_shift_en h cti my_cti h cto my_cto h cfi my_cfi h cfo my_cfo h}
+exit
