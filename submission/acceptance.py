@@ -807,7 +807,10 @@ def inspect_run(run_dir, script, execution, *, full_insertion, task_spec=None, d
         if not path.is_relative_to(run_dir.resolve()):
             raise ValueError("Output artifact is outside its run")
         if not path.is_file() or not path.stat().st_size:
-            missing.append(name)
+            # Runner-added evidence reports are not deliverables; an absent one
+            # only leaves its dependent check without evidence.
+            if not name.startswith("reports/auto_"):
+                missing.append(name)
         elif path.suffix == ".rpt":
             artifacts[name] = path.read_text(encoding="utf-8", errors="replace")
     log_name = f"{run_dir.name}.log"

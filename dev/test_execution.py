@@ -19,6 +19,23 @@ import time
 
 
 @unittest.skipUnless(os.name == "posix", "Submission runs inside the Linux image")
+
+class EvidenceReportTests(unittest.TestCase):
+    def test_missing_evidence_reports_are_added_before_exit_only_for_insertion(self):
+        from scan_runner import with_evidence_reports
+        body = ('set_scan_element false {u_a/*}\nadd_pseudo_pi {u_b/q}\nexamine_scan_drc\nexamine_scan_chain\n'
+                'insert_dft_logic\nrpt_scan_chain -file "$out_rpt_dir/c.rpt"\nexit\n')
+        out = with_evidence_reports(body)
+        added = out[len(body) - len('exit\n'):-len('exit\n')]
+        self.assertTrue(out.endswith('exit\n'))
+        self.assertIn('rpt_scan_element -type all', added)
+        self.assertIn('rpt_pseudo_pi', added)
+        self.assertNotIn('rpt_scan_chain -file', added)
+        self.assertNotIn('rpt_wrapper_cfg', added)
+        self.assertEqual(with_evidence_reports(out), out)
+        preprocessing = 'set_scan_element false {u_a/*}\nexamine_scan_drc\nexit\n'
+        self.assertEqual(with_evidence_reports(preprocessing), preprocessing)
+
 class ExecutionTests(unittest.TestCase):
     def test_requirement_quote_correction_does_not_rerun_or_change_scan(self):
         line = 'if {[llength $indices] >= 10} {'

@@ -24,7 +24,50 @@ def generated_script(source, run_dir, body):
         raise ValueError("Generated body must not redefine runner-owned paths")
     return (f'set input_dir {{{source.as_posix()}}}\n'
             f'set out_res_dir {{{(run_dir / "deliverables").as_posix()}}}\n'
-            f'set out_rpt_dir {{{(run_dir / "reports").as_posix()}}}\n' + body)
+            f'set out_rpt_dir {{{(run_dir / "reports").as_posix()}}}\n' + with_evidence_reports(body))
+
+
+# Read-only reports that acceptance needs as evidence: (trigger command or
+# None for every full insertion, report already present, command to add).
+# They only describe the inserted design; they never change insertion.
+EVIDENCE_REPORTS = (
+    (None, r"rpt_scan_cfg\b", 'rpt_scan_cfg -file "$out_rpt_dir/auto_scan_cfg.rpt"'),
+    (None, r"rpt_scan_signal\b", 'rpt_scan_signal -file "$out_rpt_dir/auto_scan_signal.rpt"'),
+    (None, r"rpt_scan_chain\b(?!_)", 'rpt_scan_chain -file "$out_rpt_dir/auto_scan_chain.rpt"'),
+    (None, r"rpt_scan_chain_cell\b", 'rpt_scan_chain_cell -file "$out_rpt_dir/auto_scan_chain_cell.rpt"'),
+    (None, r"rpt_insertion_info\b", 'rpt_insertion_info -file "$out_rpt_dir/auto_insertion_info.rpt"'),
+    (r"set_scan_element\b", r"rpt_scan_element\b[^\n]*-type\s+all\b",
+     'rpt_scan_element -type all -file "$out_rpt_dir/auto_scan_element.rpt"'),
+    (r"add_pseudo_pi\b", r"rpt_pseudo_pi\b", 'rpt_pseudo_pi -file "$out_rpt_dir/auto_pseudo_pi.rpt"'),
+    (r"add_scan_partition\b", r"rpt_scan_partition\b", 'rpt_scan_partition -file "$out_rpt_dir/auto_scan_partition.rpt"'),
+    (r"set_shift_register\b", r"rpt_shift_register\b", 'rpt_shift_register -file "$out_rpt_dir/auto_shift_register.rpt"'),
+    (r"set_wrapper_cfg\b", r"rpt_wrapper_cfg\b", 'rpt_wrapper_cfg -file "$out_rpt_dir/auto_wrapper_cfg.rpt"'),
+    (r"load_ctl\b|\w*scan_segment\b", r"rpt_scan_segment\b", 'rpt_scan_segment -file "$out_rpt_dir/auto_scan_segment.rpt"'),
+)
+
+
+def with_evidence_reports(body):
+    """Add missing evidence reports after insertion, before the final exit.
+
+    A full insertion that used, e.g., set_scan_element but forgot its report
+    cannot be verified; adding the report is cheaper than a repair round and
+    does not alter any insertion command.  Bodies without insert_dft_logic are
+    returned unchanged.
+    """
+    commands = [line for line in body.splitlines() if not line.lstrip().startswith("#")]
+    text = "\n".join(commands)
+    if not re.search(r"(?m)^\s*insert_dft_logic\b", text):
+        return body
+    added = [command for trigger, present, command in EVIDENCE_REPORTS
+             if (trigger is None or re.search(trigger, text, re.I)) and not re.search(r"(?m)^\s*" + present, text)]
+    if not added:
+        return body
+    block = "# runner: read-only evidence reports missing from the plan\n" + "\n".join(added) + "\n"
+    lines = body.splitlines(True)
+    exits = [i for i, line in enumerate(lines) if re.match(r"\s*exit\b", line)]
+    if not exits:
+        return body + ("" if body.endswith("\n") else "\n") + block
+    return "".join(lines[:exits[-1]]) + block + "".join(lines[exits[-1]:])
 
 
 def record_change(target, old_id, run_id, previous, script, change_id):
