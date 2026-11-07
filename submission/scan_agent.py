@@ -76,8 +76,9 @@ def main():
                 for result in [json.loads(path.read_text(encoding="utf-8"))]
             ]
             decision_path.write_text(json.dumps(decision, ensure_ascii=False, indent=2), encoding="utf-8")
-            if isinstance(exc, (TimeoutError, ModelResponseError, OSError)) and \
-                    _publish_accepted_on_timeout(target, decision, decision_path):
+            # Any later failure (deadline, model output, a rejected follow-up
+            # candidate) must not discard a round that passed every program check.
+            if _publish_accepted_on_timeout(target, decision, decision_path):
                 print(json.dumps({"execution_complete": True, "model_verification": "incomplete", "failure_type": type(exc).__name__}))
                 return 0
         print(json.dumps({"execution_complete": False, "failure_type": type(exc).__name__}))
@@ -106,8 +107,8 @@ def _publish_accepted_on_timeout(target, decision, decision_path):
     publish_run(target, run)
     decision.update({
         "final_run": run.name,
-        "summary": f"{run.name} 通过全部程序验收；总时限在模型核验完成前到期，模型核验未完成。非完整语义证明。",
-        "model_verification": "incomplete_deadline",
+        "summary": f"{run.name} 通过全部程序验收；后续步骤（{decision.get('failure_type')}）在模型核验认可前中止，模型核验未完成。非完整语义证明。",
+        "model_verification": "incomplete_deadline" if decision.get("failure_type") == "TimeoutError" else "incomplete_after_error",
     })
     decision_path.write_text(json.dumps(decision, ensure_ascii=False, indent=2), encoding="utf-8")
     return True

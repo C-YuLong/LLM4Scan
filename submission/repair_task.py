@@ -814,8 +814,7 @@ def repair(source, target, started, deadline, generate, design_outline):
         unresolved = [i['issue_id'] for i in history if not i['attempts'][-1]['verify']['resolved']]
         if _publish_accepted_on_timeout(target, decision, decision_path):
             decision.update(model_verification="disputed", model_unresolved_issues=unresolved,
-                            summary=decision["summary"].replace("总时限在模型核验完成前到期，模型核验未完成",
-                                                                f"模型核验未认可（未解决：{unresolved}）"))
+                            summary=f"{decision['final_run']} 通过全部程序验收；模型核验未认可（未解决：{unresolved}）。非完整语义证明。")
             decision_path.write_text(json.dumps(decision, ensure_ascii=False, indent=2), encoding="utf-8")
             success = True
     print(json.dumps({"repair_completed": bool(success), "issues": len(history), "rounds": len(runs), "elapsed": round(time.monotonic() - started, 2)}))
