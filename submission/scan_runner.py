@@ -24,7 +24,12 @@ def generated_script(source, run_dir, body):
         raise ValueError("Generated body must not redefine runner-owned paths")
     return (f'set input_dir {{{source.as_posix()}}}\n'
             f'set out_res_dir {{{(run_dir / "deliverables").as_posix()}}}\n'
-            f'set out_rpt_dir {{{(run_dir / "reports").as_posix()}}}\n' + with_evidence_reports(body))
+            f'set out_rpt_dir {{{(run_dir / "reports").as_posix()}}}\n' + with_evidence_reports(normalize_booleans(body)))
+
+
+def normalize_booleans(body):
+    """The tool accepts only lowercase true/false option values (CMD-0074)."""
+    return re.sub(r"(?m)(\s-[A-Za-z_]\w*\s+)(True|False|TRUE|FALSE)(?=\s|$)", lambda m: m[1] + m[2].lower(), body)
 
 
 # Read-only reports that acceptance needs as evidence: (trigger command or
