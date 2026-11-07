@@ -1,0 +1,51 @@
+# 使用 --config 加载；不指定配置时继续运行现有 generator + legacy Verify。
+# 使用说明：README.md
+schema_version = 1
+
+[pipeline]
+# 选择实现。目前只有 current generator；后续实现注册后可增加名字。
+generator = "current"
+# legacy = 现有 Verify；direct_agent = 按需查证 Verify。
+verifier = "legacy"
+# gate = 所选 Verify 控制反馈/交付；shadow = 旧 Verify 控制，新 Verify 仅记录。
+verification_mode = "gate"
+
+[generators.current]
+backend = "current"
+model_profile = "generation"
+
+[verifiers.legacy]
+backend = "legacy"
+# 现有 Task 1 Verify 不调用模型，所以不配置 model_profile。
+
+[verifiers.direct_agent]
+backend = "direct_agent"
+model_profile = "verification"
+# 使用原生工具调用。不支持时明确报错，不静默退化为纯文本判断。
+tool_protocol = "native"
+timeout_seconds = 120
+max_model_turns = 8
+max_tool_calls = 24
+# 0: 不启用总 token 门槛；实际用量仍记录。正整数可重新启用。
+max_total_tokens = 0
+max_output_tokens_per_call = 3000
+page_rows = 30
+max_tool_result_chars = 12000
+# true: 按已保存证据及当前问题范围加载读取工具；false: 固定接口对照
+dynamic_evidence_tools = false
+
+[models.generation]
+# model 与 model_env 二选一。可把下一行改为 model = "实际可用的模型名"。
+model_env = "LLM_MODEL"
+base_url_env = "LLM_BASE_URL"
+api_key_env = "LLM_API_KEY"
+reasoning_effort = "none"
+
+[models.verification]
+# 默认读取同一个模型变量，但这是独立 profile。
+# 若要分开：改成 VERIFY_LLM_MODEL，并在环境中设置对应模型名。
+# 端点和密钥同理，可改成 VERIFY_LLM_BASE_URL / VERIFY_LLM_API_KEY。
+model_env = "LLM_MODEL"
+base_url_env = "LLM_BASE_URL"
+api_key_env = "LLM_API_KEY"
+reasoning_effort = "none"
