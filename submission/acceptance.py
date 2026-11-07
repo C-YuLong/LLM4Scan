@@ -237,6 +237,19 @@ def merge_task_constraints(spec, extracted, *, design_context=()):
         req["scan_membership"].append({"target": matches[0]["path"], "value": "exclude", "task_quote": line,
                                        "source_selector": matches[0]["selector"], "module_type": matches[0]["type"],
                                        "source": "deterministic_domain_parser"})
+    # Clear mixing statements decide mix_clocks/mix_edges; models have
+    # inverted "保持时钟域与时钟沿分离" into mixing allowed.
+    for line in spec.splitlines():
+        if re.search(r"分离|(?:不|不得|不允许|不能|禁止)混合|不得跨|不跨", line):
+            value = "False"
+        elif re.search(r"允许[^。；;\n]*混合|可以[^。；;\n]*混合|可混合", line):
+            value = "True"
+        else:
+            continue
+        if re.search(r"时钟域|clock domain", line, re.I):
+            req["config"]["mix_clocks"] = value
+        if re.search(r"时钟沿|边沿|触发沿|clock edge", line, re.I):
+            req["config"]["mix_edges"] = value
     # A scan enable explicitly controlling both SFF shift/capture and ICGs
     # has usage all, whatever single usage a model extraction chose.
     for signal in req["signals"]:
