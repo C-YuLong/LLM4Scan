@@ -111,6 +111,10 @@ def merge_task_constraints(spec, extracted, *, design_context=()):
                       "wrp_in_shift_en", "wrp_out_shift_en", "wrp_in_capture_en", "wrp_out_capture_en"):
             if kind == 'reset' and re.search(r'(?:无需|无须|不需要|不必)[^。；\n]*(?:reset|复位)[^。；\n]*(?:扫描信号|扫描配置)', quote, re.I):
                 raise ValueError('The cited text says scan reset configuration is not required; do not make it mandatory')
+            role_words = {"clock": r"clock|时钟", "reset": r"reset|复位", "scan_enable": r"scan_enable|扫描使能|shift"}.get(kind)
+            if role_words and any(target in sentence and re.search(r"(?:不作为|不是|无需|不需要|没有|不需|并非)[^。；;]*(?:" + role_words + ")", sentence, re.I)
+                                  for sentence in re.split(r"[。；;\n]", quote)):
+                raise ValueError(f"The cited sentence negates the {kind} role for {target!r}; do not extract a negated requirement")
             if kind != "constant":
                 polarities = {"": "", "active_high": "0", "active_low": "1", "inactive_0": "0", "inactive_1": "1"}
                 if value not in polarities:
@@ -169,6 +173,8 @@ def merge_task_constraints(spec, extracted, *, design_context=()):
                       "shared": ("shared", None), "none": ("none", None)}
             if not target or value not in styles:
                 raise ValueError("wrapper_port requires one named port and dedicated/custom/shared/none; generic all-port requirements belong in uncovered")
+            if target.lower() in styles or target.lower() in ("wrapper", "all", "ports"):
+                raise ValueError("wrapper_port target must be an actual port name, not the wrapper style; a style-only wrapper request belongs in uncovered")
             style, cell_type = styles[value]
             existing = next((s for s in req["wrapper_ports"] if s["port"] == target), None)
             if existing:
@@ -198,12 +204,31 @@ def merge_task_constraints(spec, extracted, *, design_context=()):
     for line in spec.splitlines():
         if not re.search(r"扫描链|串链|不可扫描|non-?scan", line, re.I):
             continue
-        for selector in dict.fromkeys(re.findall(r"`([A-Za-z_][\w$]*(?:/[\w$\[\]*]+)+)`", line)):
+        selectors = [s for s in dict.fromkeys(re.findall(r"`([A-Za-z_][\w$]*(?:/[\w$\[\]*]+)+)`", line))
+                     if membership_polarity(line, s) is not None]
+        if selectors:
+            # Model rules citing this sentence through a different (resolved
+            # hierarchy) target contradict its literal selectors; drop them.
+            req["scan_membership"] = [rule for rule in req["scan_membership"]
+                                      if rule["target"] in selectors or line not in rule.get("task_quote", "")]
+        for selector in selectors:
             value = membership_polarity(line, selector)
-            if value is None or any(rule["target"] == selector for rule in req["scan_membership"]):
+            existing = next((rule for rule in req["scan_membership"] if rule["target"] == selector), None)
+            if existing is not None:
+                existing["value"] = value
                 continue
             req["scan_membership"].append({"target": selector, "value": value, "task_quote": line,
                                            "source": "deterministic_sentence_parser"})
+    # A scan enable explicitly controlling both SFF shift/capture and ICGs
+    # has usage all, whatever single usage a model extraction chose.
+    for signal in req["signals"]:
+        if signal.get("role") != "scan_enable":
+            continue
+        for sentence in re.split(r"[；;\n]", spec):
+            if (f"`{signal['port']}`" in sentence and re.search(r"ICG|门控", sentence, re.I)
+                    and re.search(r"shift|capture|移位|捕获", sentence, re.I)):
+                signal["usage"] = "all"
+                break
     return req
 
 
