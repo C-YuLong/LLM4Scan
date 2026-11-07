@@ -157,7 +157,11 @@ def diagnosis_source_texts(source, issues):
 
 
 def stage_lines(script):
-    return [(i, line.split()[0]) for i, line in enumerate(script.splitlines()) if line.strip() and line.split()[0] in STAGES]
+    # A preprocessing insert_dft_logic (-connect_icg_only etc.) before DRC is
+    # not the insertion stage; acceptance classifies it the same way.
+    return [(i, line.split()[0]) for i, line in enumerate(script.splitlines())
+            if line.strip() and line.split()[0] in STAGES
+            and not re.search(r"-(?:connect_icg_only|replace_only|replace_unscan)\b", line)]
 
 
 def explicit_diagnosis_gaps(script, requirements, original_checks, issues, *, original_log='', original_reports=None):

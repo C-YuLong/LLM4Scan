@@ -283,7 +283,7 @@ def generate(prompt, timeout, instructions=None, output_schema=TASK1, *, tool_gu
             "object scopes: ICG exclusions and non-scannable FF hierarchies are separate requirements."
         ),
         "input": prompt,
-        "reasoning": {"effort": "low" if timeout <= 180 else "medium"},
+        "reasoning": {"effort": os.environ.get('LLM_REASONING_EFFORT') or ("low" if timeout <= 180 else "medium")},
         "stream": True,
         "store": False,
         "text": {"format": {"type": "json_schema", "name": "scan_response", "strict": True, "schema": output_schema}},
@@ -294,10 +294,14 @@ def generate(prompt, timeout, instructions=None, output_schema=TASK1, *, tool_gu
         payload['instructions'] = (
             'Tool reference for syntax; it does not override the actual task requirements.\n'
             + tool_guide + '\n\nCurrent task instructions:\n' + payload['instructions'])
+    payload['instructions'] += (
+        '\nReturn only a JSON object conforming to this schema. No Markdown fences or commentary. '
+        'Escape quotes and newlines inside string values exactly once for JSON; do not double-encode the object.\n'
+        + json.dumps(output_schema, separators=(',', ':')))
     protocol = os.environ.get('LLM_API_MODE', 'chat_completions')
     if protocol == 'chat_completions':
         payload = {'model': payload['model'], 'messages': [
-            {'role': 'system', 'content': payload['instructions'] + '\nReturn only a JSON object conforming to this schema:\n' + json.dumps(output_schema, separators=(',', ':'))},
+            {'role': 'system', 'content': payload['instructions']},
             {'role': 'user', 'content': prompt}]}
         # DashScope's fixed competition model maps low effort to high. Its
         # documented non-thinking mode leaves time for Scan and verification
@@ -356,23 +360,23 @@ def generate(prompt, timeout, instructions=None, output_schema=TASK1, *, tool_gu
             raise ModelResponseError('Chat completion did not finish normally', content, usage)
         if not isinstance(content, str):
             raise ModelResponseError('Chat content must be a JSON string', content, usage)
-        try:
-            plan = json.loads(content)
-        except json.JSONDecodeError as exc:
-            raise ModelResponseError(f'Invalid JSON at line {exc.lineno}, column {exc.colno}', content, usage) from exc
-        from model_contract import validate, strip_extra_fields
-        if isinstance(plan, dict):
-            plan, _ = strip_extra_fields(plan, output_schema)
-        try:
-            validate(plan, output_schema)
-        except ValueError as exc:
-            raise ModelResponseError(str(exc), plan, usage) from exc
-        return plan, usage
-    text = "".join(c["text"] for item in completed.get("output", []) for c in item.get("content", []) if c.get("type") == "output_text")
-    usage = completed.get("usage")
+    else:
+        content = "".join(c["text"] for item in completed.get("output", []) for c in item.get("content", []) if c.get("type") == "output_text")
+        usage = completed.get("usage")
     if failed_http and usage is not None:
         usage["failed_http_statuses"] = failed_http
-    return json.loads(text), usage
+    try:
+        plan = json.loads(content)
+    except json.JSONDecodeError as exc:
+        raise ModelResponseError(f'Invalid JSON at line {exc.lineno}, column {exc.colno}', content, usage) from exc
+    from model_contract import validate, strip_extra_fields
+    if isinstance(plan, dict):
+        plan, _ = strip_extra_fields(plan, output_schema)
+    try:
+        validate(plan, output_schema)
+    except ValueError as exc:
+        raise ModelResponseError(str(exc), plan, usage) from exc
+    return plan, usage
 
 
 def unrequested_partitions(specification, dofile):
