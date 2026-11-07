@@ -111,6 +111,8 @@ def merge_task_constraints(spec, extracted, *, design_context=()):
                       "wrp_in_shift_en", "wrp_out_shift_en", "wrp_in_capture_en", "wrp_out_capture_en"):
             if kind == 'reset' and re.search(r'(?:无需|无须|不需要|不必)[^。；\n]*(?:reset|复位)[^。；\n]*(?:扫描信号|扫描配置)', quote, re.I):
                 raise ValueError('The cited text says scan reset configuration is not required; do not make it mandatory')
+            if not re.fullmatch(r"[A-Za-z_][\w$]*(?:\[\d+\])?(?:/[\w$\[\]]+)*", target or ""):
+                raise ValueError(f"Signal target {target!r} is not a port or pin name; port-name formats such as scan_data_in_%d are not signals")
             role_words = {"clock": r"clock|时钟", "reset": r"reset|复位", "scan_enable": r"scan_enable|扫描使能|shift"}.get(kind)
             if role_words and any(target in sentence and re.search(r"(?:不作为|不是|无需|不需要|没有|不需|并非)[^。；;]*(?:" + role_words + ")", sentence, re.I)
                                   for sentence in re.split(r"[。；;\n]", quote)):
