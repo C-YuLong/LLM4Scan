@@ -3,7 +3,7 @@ import json
 from copy import deepcopy
 from pathlib import Path
 
-from .tool_schema import FINAL_SCHEMA, validate_schema
+from .tool_schema import FINAL_SCHEMA, validate_schema, ToolArgumentError
 
 
 
@@ -67,19 +67,28 @@ def usable_evidence(record):
 
 
 def finalize(value, tools):
-    validate_schema(value,FINAL_SCHEMA)
+    try:
+        validate_schema(value,FINAL_SCHEMA)
+    except ValueError as exc:
+        raise ToolArgumentError(str(exc)) from exc
     value=deepcopy(value)
     tools.current()
     issues=list(value["unverified"])
     all_sources={key:tools.read(key).splitlines() for key in tools.artifacts
                  if key.startswith("input/") and key.endswith(".md")}
-    def reference(ref):
+    references=[(f'$.items[{index}].task_ref',item['task_ref']) for index,item in enumerate(value['items'])]
+    references.extend((f'$.context[{index}].task_ref',entry['task_ref']) for index,entry in enumerate(value['context']))
+    invalid=[]
+    for path,ref in references:
         source=ref["source"]; lines=all_sources.get(source)
         if lines is None or not 1<=ref["line_start"]<=ref["line_end"]<=len(lines):
-            raise ValueError("Invalid task source reference")
+            invalid.append(f"{path}: invalid {source}:{ref['line_start']}-{ref['line_end']}; "
+                           + (f"require 1 <= line_start <= line_end <= {len(lines)}" if lines is not None
+                              else f"source must be one of {sorted(all_sources)}"))
+    if invalid:
+        raise ToolArgumentError('; '.join(invalid))
     statuses=[]; checked_counterexamples=[]; counterexample_errors=[]; interpreted_checks=[]
     for item_index,item in enumerate(value["items"]):
-        reference(item["task_ref"])
         witnesses=[]
         if item["status"]=="FAIL" and item["kind"] in {"structural","report"}:
             for witness_index,witness in enumerate(item.get("counterexamples") or []):
@@ -115,8 +124,6 @@ def finalize(value, tools):
         if status=="UNKNOWN": issues.append("Unverified requirement: "+item["requirement"])
         item["validated_status"]=status
         statuses.append(status)
-    for entry in value["context"]:
-        reference(entry["task_ref"])
     if not value["reviewed_task"] or not value["items"]: issues.append("Final full-task review is incomplete")
     failures=[key for key,r in tools.records.items() if r.get("proof") and r.get("complete") and r.get("status")=="FAIL"]
     # A failed predicate is not necessarily a violated task clause: a model may

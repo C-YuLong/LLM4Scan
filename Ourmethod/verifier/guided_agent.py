@@ -89,7 +89,10 @@ def _session_body(source,run_dir,script,execution,output_dir,settings,client,dea
     state.observer=diagnostics.event
     if requirement is not None:
         state.load_requirement(requirement)
-        instructions += "\nYou are an isolated worker. Verify only the assigned requirement; do not plan or judge other requirements."
+        state.set_question(dict(question='Verify the assigned requirement: '+requirement['requirement'],
+                                artifacts=list(tools.identity),
+                                expected_fact='Evidence supporting or contradicting: '+requirement['requirement']))
+        instructions += "\nYou are an isolated worker. Your assigned requirement is already the initial question, with the registered artifacts available. Start querying its evidence; use set_question only to refine a concrete gap. Verify only this requirement; do not plan or judge other requirements."
     token_limit=settings['max_total_tokens']
     task={key:tools.read(key) for key in tools.artifacts if key.startswith('input/') and key.endswith('.md')}
     initial=dict(task_sources=task,run_id=Path(run_dir).name,execution=execution,artifacts=tools.model_artifact_manifest(),

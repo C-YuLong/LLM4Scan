@@ -6,7 +6,7 @@ import time
 from .tools import EvidenceTools, encoded
 from .context import ContextProjection, byte_size
 from .result import FINAL_SCHEMA, finalize, parse_final
-from .tool_schema import ToolArgumentError, validate_schema
+from .tool_schema import ToolArgumentError
 from .gaps import annotate
 from .model_tools import ModelTools, GUIDE as MODEL_GUIDE, DYNAMIC_GUIDE
 
@@ -139,6 +139,7 @@ def verify(source, run_dir, script, execution, output_dir, settings, client, *, 
     context_calls=[]
     metrics=dict(model_calls=0,tool_calls=0,total_tokens=0,usage_complete=True,usage=[])
     invalid_rounds=0  # At most two correction responses after an invalid call.
+    invalid_final=False
     metrics["argument_retry_rounds"]=0
     result=None; transcript=[]; token_ratio=1.0; seen_tool_outputs=set(); termination=None
     try:
@@ -161,16 +162,17 @@ def verify(source, run_dir, script, execution, output_dir, settings, client, *, 
                 termination="token_admission_budget"
                 raise TimeoutError("Verify token admission budget exhausted")
             max_output=min(settings["max_output_tokens_per_call"],available) if token_limit else settings['max_output_tokens_per_call']
-            final_only=(metrics["model_calls"]+1>=settings["max_model_turns"]
+            # Keep one configured call available to correct a malformed final
+            # response; the total call count and absolute deadline stay fixed.
+            final_only=(metrics["model_calls"]+2>=settings["max_model_turns"] or invalid_final
                         or remaining<25 or metrics["tool_calls"]>=settings["max_tool_calls"]
-                        or (token_limit and metrics["model_calls"]>0 and available<estimate+2*settings["max_output_tokens_per_call"])
-                        or any(r.get("proof") and r.get("complete") and r.get("status")=="FAIL" for r in tools.records.values()))
+                        or (token_limit and metrics["model_calls"]>0 and available<estimate+2*settings["max_output_tokens_per_call"]))
             budget=f'\nRemaining budget: {remaining:.1f}s, {settings["max_model_turns"]-metrics["model_calls"]} model calls, {settings["max_tool_calls"]-metrics["tool_calls"]} tool calls. '
             budget+=(f'{token_limit-metrics["total_tokens"]} total tokens remaining. ' if token_limit else 'Total token budget disabled; usage is still recorded. ')
             if invalid_rounds:
                 budget += "Correct the invalid tool arguments using the field error and allowed values in the tool output. "
                 budget += f"At most {3-invalid_rounds} correction response(s) remain; do not invent operations. "
-            if final_only:budget+='This is the final response. Call finish_verification now with supported FAIL or PASS, otherwise UNKNOWN and unverified requirements. No more evidence queries.'
+            if final_only:budget+='Submit finish_verification now with supported FAIL or PASS, otherwise UNKNOWN and unverified requirements. No more evidence queries. Any remaining call is reserved for correcting invalid final arguments.'
             if mode=="compact":
                 state=dict(role="user",content="Current controller state:\n"+checklist_prompt+archive_prompt+budget)
                 request_messages=[request_messages[0],state,*request_messages[1:]]
@@ -219,11 +221,12 @@ def verify(source, run_dir, script, execution, output_dir, settings, client, *, 
                 if len(calls)!=1:raise ValueError("Final decision cannot be mixed with unexecuted evidence queries")
                 try:
                     value=json.loads(finishes[0]["arguments"])
-                    validate_schema(value,FINAL_SCHEMA)
-                except (ValueError,TypeError) as exc:
+                    checked=finalize(value,tools)
+                except (json.JSONDecodeError,ToolArgumentError,TypeError) as exc:
+                    invalid_final=True
                     answer=dict(status="UNKNOWN",error_type="ToolArgumentError",message=str(exc),
                                 retryable=invalid_rounds<2,retries_remaining=max(0,2-invalid_rounds),
-                                instruction="Correct the final arguments to match finish_verification's schema.")
+                                instruction="Correct all listed final argument errors using the original numbered task sources; preserve the evidence and substantive decisions. Do not query or repair the circuit.")
                     answer=annotate(answer)
                     messages.append(dict(type="function_call_output",call_id=finishes[0]["call_id"],output=encoded(answer)))
                     transcript.append(dict(tool="finish_verification",arguments=finishes[0]["arguments"],result=answer))
@@ -232,7 +235,7 @@ def verify(source, run_dir, script, execution, output_dir, settings, client, *, 
                         raise ValueError("Tool argument retries exhausted")
                     invalid_rounds+=1;metrics["argument_retry_rounds"]+=1
                     continue
-                checked=finalize(value,tools)
+                invalid_final=False
                 if checked.get("counterexample_errors") and checked["status"]!="FAIL":
                     answer=dict(status="UNKNOWN",error_type="CounterexampleError",message="; ".join(checked["counterexample_errors"]),
                                 retryable=invalid_rounds<2,retries_remaining=max(0,2-invalid_rounds),

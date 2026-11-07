@@ -15,6 +15,8 @@ python -X utf8 dev/run_local.py --implementation ourmethod --runtime-image local
 
 本次 [合并实验](dev/分支合并实验_20261107.md)：Luna 下原有实现的 T1/C4、T2/C1 均通过独立验收；同一 T1/C4 的 Ourmethod guided、direct 候选通过 6 项结构检查，但全任务核验均为 UNKNOWN，未发布。guided 未在预算内核验完全部要求，direct 最终引用行号无效；不据此宣称新核验器已完成整例交付。
 
+随后已修复最终引用纠错、发布前文件说明、guided 重复建立问题，以及 direct 因任意失败谓词提前结束查证的问题，5 项离线回归通过。Luna 同例重测仍未完成交付：guided 为 4 PASS / 4 UNKNOWN；direct 又把 PLL 外应转为扫描 FF 的要求反向解释，触发两轮误判与修复，最后核验超时。详见同一实验记录的修复重测部分。
+
 当前授权限制：用户已明确允许项目开发和测试直接调用 gproxy，无需逐次确认；测试模型仍按此前要求使用 Luna，百炼及其他 Key 仍禁止读取或使用。本地启动器已恢复仅限 gproxy 的入口，在读取 Key 前核对地址、协议及凭据变量名，不会自动切换服务。官方公开平台仍禁止其他模型，并会忽略自定义 URL/model，所以本地调用授权不代表可以上传 Luna 或把 gproxy Key 发往百炼；凭据打包及平台登录入口保持阻断。下文提交、充值及其他外部 API 验证等历史流程不是当前执行授权。详见 [AGENTS.md](AGENTS.md)。
 
 历史 demo-rc4 已交付 11 个公开案例的本地端到端 Demo，按《Scan_Insertion竞赛冲冠实现方案.md》开发；不是当前版本正式模型的通过成绩。
