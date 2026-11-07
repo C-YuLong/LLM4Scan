@@ -258,9 +258,15 @@ def merge_task_constraints(spec, extracted, *, design_context=()):
         if signal.get("role") != "scan_enable":
             continue
         for sentence in re.split(r"[；;\n]", spec):
-            if (f"`{signal['port']}`" in sentence and re.search(r"ICG|门控", sentence, re.I)
-                    and re.search(r"shift|capture|移位|捕获", sentence, re.I)):
+            if f"`{signal['port']}`" not in sentence or not re.search(r"ICG|门控", sentence, re.I):
+                continue
+            # Both duties -> all; an ICG-only duty (e.g. keeping ICGs open
+            # during shift) -> clock_gating.
+            if re.search(r"shift|capture|移位|捕获", sentence.replace("移位阶段", ""), re.I):
                 signal["usage"] = "all"
+                break
+            if re.search(r"保持导通|导通|打开|使能所有|enable all", sentence, re.I):
+                signal["usage"] = "clock_gating"
                 break
     return req
 
