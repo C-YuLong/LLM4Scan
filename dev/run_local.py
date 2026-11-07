@@ -1,4 +1,4 @@
-"""Run in the project Linux runtime using authorized gproxy/Luna or no model."""
+"""Run locally using authorized gproxy/Luna, official DeepSeek Flash, or no model."""
 
 import argparse
 import json
@@ -26,14 +26,16 @@ def main():
                         help='Ourmethod verifier selection')
     parser.add_argument('--verification-mode', choices=('gate', 'shadow'),
                         help='Ourmethod verification mode')
+    parser.add_argument('--provider', choices=('gproxy', 'deepseek'), default='gproxy',
+                        help='gproxy/Luna or official DeepSeek Flash; credentials stay provider-specific')
     parser.add_argument('--competition-api', action='store_true',
-                        help='Disabled: the user authorizes gproxy only, not competition API credentials')
+                        help='Disabled: platform and DashScope credentials are not authorized')
     parser.add_argument("--initial-plan", type=Path, help="Development-only replay: seed first response from a saved model plan; subsequent Luna calls remain live")
     parser.add_argument("--tool-dofile", type=Path, help="Development fixture feasibility only: execute this oracle body without a model")
     parser.add_argument('--netlist-edits', type=Path, help='Fixture-only JSON with edits; requires --tool-dofile')
     args = parser.parse_args()
     if args.competition_api:
-        parser.error('Only gproxy is authorized. Competition API credentials will not be read or used.')
+        parser.error('Platform and DashScope credentials will not be read or used.')
     if args.implementation != 'ourmethod' and (args.verifier or args.verification_mode):
         parser.error('--verifier and --verification-mode require --implementation ourmethod')
     if args.implementation == 'ourmethod' and (args.initial_plan or args.tool_dofile or args.netlist_edits):
@@ -46,7 +48,12 @@ def main():
         "SCANINSERTION_LICENSE_SERVER": "8273@121.40.209.111",
         "CASE_ID": args.input_dir.name if args.input_dir else args.case,
     }
-    if not args.tool_dofile:
+    if not args.tool_dofile and args.provider == 'deepseek':
+        environment.update(LLM_BASE_URL='https://api.deepseek.com',
+                           LLM_API_KEY=os.environ['DEEPSEEK_API_KEY'],
+                           LLM_MODEL='deepseek-flash', LLM_API_MODE='responses',
+                           LLM_REASONING_EFFORT='none')
+    elif not args.tool_dofile:
         config_path = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex")) / "config.toml"
         config = tomllib.loads(config_path.read_text(encoding="utf-8"))
         provider = config['model_providers']['gproxy']
