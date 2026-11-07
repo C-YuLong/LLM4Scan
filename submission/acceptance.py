@@ -12,6 +12,44 @@ from model_contract import TASK_CONSTRAINTS, ModelResponseError
 STAGES = ("examine_scan_drc", "examine_scan_chain", "insert_dft_logic")
 
 
+_MEMBERSHIP_NEGATIVE = re.compile(r'不(?:允许|能|得|应|要|需|可)?(?:参与|进入|加入|接入|串入|串链)|排除|禁止(?:参与|串)|不可扫描|non-?scan', re.I)
+_MEMBERSHIP_POSITIVE = re.compile(r'(?<!不)(?<!不允许)(?<!不能)(?<!不得)(?<!不应)(?:参与|进入|加入|串入)(?:扫描链|串链)?')
+
+
+def membership_polarity(quote, target):
+    """Deterministic include/exclude implied by one cited sentence, or None.
+
+    Only decides clear forms: a sentence-level negative/positive membership
+    phrase, optionally with one exception clause (除了 X ... 其余 / X 除外).
+    Objects named inside the exception get the opposite polarity.  Anything
+    else is left to the model extraction rather than guessed here.
+    """
+    sentences = [s for s in re.split(r'[。；;\n]', quote) if target.rstrip('*') and target.rstrip('*') in s]
+    if len(sentences) != 1:
+        return None
+    sentence = sentences[0]
+    exception = (re.search(r'除(?!外)(?:了)?(?P<body>.+?)(?:以外|之外|外)?[，,]\s*(?P<rest>(?:其余|其他|其它|剩余).*)', sentence)
+                 or re.search(r'除(?!外)(?:了)?(?P<body>.+?)(?:以外|之外)(?P<rest>.*)', sentence))
+    if exception:
+        body, rest = exception['body'], exception['rest']
+    else:
+        trailing = re.search(r'(?P<body>`?[\w/\[\]*$]+`?(?:\s*(?:下|内)的?)?)\s*除外', sentence)
+        body, rest = (trailing['body'], sentence[trailing.end():]) if trailing else ('', sentence)
+    negative, positive = bool(_MEMBERSHIP_NEGATIVE.search(rest)), bool(_MEMBERSHIP_POSITIVE.search(_MEMBERSHIP_NEGATIVE.sub('', rest)))
+    if negative == positive:
+        return None
+    main = 'exclude' if negative else 'include'
+    if not body:
+        return main
+    name = target.rstrip('*')
+    # The exception names the more specific selector; an enclosing hierarchy
+    # that also appears in it as a prefix belongs to the main clause.
+    in_body = re.search(re.escape(name) + r'(?![\w/])', body) is not None
+    if in_body and not (exception and re.search(re.escape(name) + r'(?![\w/])', sentence[:exception.start()])):
+        return 'exclude' if main == 'include' else 'include'
+    return main
+
+
 def merge_task_constraints(spec, extracted, *, design_context=()):
     """Supplement known report checks, never replace task-explicit constraints.
 
@@ -112,6 +150,12 @@ def merge_task_constraints(spec, extracted, *, design_context=()):
                     break
             if target not in quote and selected is None and not in_range:
                 raise ValueError(f'Selector {target!r} is absent from the cited lines. Extend line_start/line_end to include BOTH its name/declaration and the membership requirement, including preceding lines when the requirement says this latch/hierarchy')
+            if selected is None:
+                expected = membership_polarity(quote, target)
+                if expected is not None and expected != value:
+                    raise ValueError(f'Scan membership polarity for {target!r} contradicts the cited sentence: it implies {expected}, '
+                                     f'not {value}. In "A 下的所有单元，除了 B，其余均不允许参与" B is include and A is exclude; '
+                                     'an exception clause takes the opposite of the main rule')
             if selected is not None:
                 target = selected['path']
             existing = next((rule for rule in req['scan_membership'] if rule['target'] == target), None)
@@ -219,6 +263,9 @@ def extract_task_constraints(spec, generate, timeout, target, *, design_context=
         "from the task, value=include/exclude. A hierarchy target covers descendants; do not add "
         "wildcards absent from the task quote. For 'exclude hierarchy except PATTERN', extract "
         "BOTH the excluded hierarchy and the included exception pattern. "
+        "Polarity follows the MAIN clause, and the exception takes the opposite: for "
+        "'A 下的所有可扫描单元，除了 B 可匹配到的单元，其余均不允许参与扫描链' A is exclude and B is include; "
+        "for 'A 下的单元除了 B 以外都需要参与' A is include and B is exclude. Re-read the negation before answering. "
         "For an explicit same-prefix numbered range such as item_0 到 item_4 or item_0 至 item_4, "
         "return one constraint for each exact member, not the whole prose range or a broader wildcard. "
         "Cite the object declaration AND its membership rule together when the rule uses a pronoun "

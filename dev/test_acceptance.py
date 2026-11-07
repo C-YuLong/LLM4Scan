@@ -7,7 +7,7 @@ import tempfile
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "submission"))
-from acceptance import _task_requirements, _task_checks, inspect_run, merge_task_constraints, extract_task_constraints
+from acceptance import _task_requirements, _task_checks, inspect_run, merge_task_constraints, extract_task_constraints, membership_polarity
 from model_contract import ModelResponseError
 from scan_runner import declared_artifacts
 
@@ -19,6 +19,25 @@ def requirements(case):
 
 
 class AcceptanceTests(unittest.TestCase):
+    def test_membership_exception_polarity_is_checked_against_cited_sentence(self):
+        spec = '对 Hinstance：`top/u_a` 下的所有可扫描单元，除了 `top/u_a/keep*` 可匹配到的扫描单元，其余均不允许参与扫描链串链。'
+        def extracted(outer, inner):
+            return {'constraints': [{'quote': spec, 'kind': 'scan_membership', 'target': 'top/u_a', 'value': outer},
+                                    {'quote': spec, 'kind': 'scan_membership', 'target': 'top/u_a/keep*', 'value': inner}],
+                    'uncovered': []}
+        rules = merge_task_constraints(spec, extracted('exclude', 'include'))['scan_membership']
+        self.assertEqual([(r['target'], r['value']) for r in rules], [('top/u_a', 'exclude'), ('top/u_a/keep*', 'include')])
+        with self.assertRaisesRegex(ValueError, 'polarity'):
+            merge_task_constraints(spec, extracted('include', 'exclude'))
+        for sentence, target, expected in [
+                ('`u_a` 下的单元除了 `u_a/b*` 以外都需要参与扫描链。', 'u_a', 'include'),
+                ('`u_a` 下的单元除了 `u_a/b*` 以外都需要参与扫描链。', 'u_a/b*', 'exclude'),
+                ('u_core 参与扫描，u_dbg 除外，其余均串入扫描链。', 'u_dbg', 'exclude'),
+                ('该模块 u_x 需标记为不可扫描。', 'u_x', 'exclude'),
+                ('模块 u_m 的功能描述。', 'u_m', None)]:
+            with self.subTest(sentence=sentence, target=target):
+                self.assertEqual(membership_polarity(sentence, target), expected)
+
     def test_plain_delivery_line_is_checked_without_a_markdown_output_heading(self):
         task = '读取 lib/sky130.lib 与 netlist/design.v。\n交付 post_scan.v、post_scan.ctl、post_scan.def；导出 drc.rpt。\n不得导出 forbidden.v。'
         requirements = _task_requirements(task)
