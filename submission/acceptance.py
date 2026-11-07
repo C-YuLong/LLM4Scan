@@ -12,6 +12,44 @@ from model_contract import TASK_CONSTRAINTS, ModelResponseError
 STAGES = ("examine_scan_drc", "examine_scan_chain", "insert_dft_logic")
 
 
+_MEMBERSHIP_NEGATIVE = re.compile(r'不(?:允许|能|得|应|要|需|可)?(?:参与|进入|加入|接入|串入|串链)|排除|禁止(?:参与|串)|不可扫描|non-?scan', re.I)
+_MEMBERSHIP_POSITIVE = re.compile(r'(?<!不)(?<!不允许)(?<!不能)(?<!不得)(?<!不应)(?:参与|进入|加入|串入)(?:扫描链|串链)?')
+
+
+def membership_polarity(quote, target):
+    """Deterministic include/exclude implied by one cited sentence, or None.
+
+    Only decides clear forms: a sentence-level negative/positive membership
+    phrase, optionally with one exception clause (除了 X ... 其余 / X 除外).
+    Objects named inside the exception get the opposite polarity.  Anything
+    else is left to the model extraction rather than guessed here.
+    """
+    sentences = [s for s in re.split(r'[。；;\n]', quote) if target.rstrip('*') and target.rstrip('*') in s]
+    if len(sentences) != 1:
+        return None
+    sentence = sentences[0]
+    exception = (re.search(r'除(?!外)(?:了)?(?P<body>.+?)(?:以外|之外|外)?[，,]\s*(?P<rest>(?:其余|其他|其它|剩余).*)', sentence)
+                 or re.search(r'除(?!外)(?:了)?(?P<body>.+?)(?:以外|之外)(?P<rest>.*)', sentence))
+    if exception:
+        body, rest = exception['body'], exception['rest']
+    else:
+        trailing = re.search(r'(?P<body>`?[\w/\[\]*$]+`?(?:\s*(?:下|内)的?)?)\s*除外', sentence)
+        body, rest = (trailing['body'], sentence[trailing.end():]) if trailing else ('', sentence)
+    negative, positive = bool(_MEMBERSHIP_NEGATIVE.search(rest)), bool(_MEMBERSHIP_POSITIVE.search(_MEMBERSHIP_NEGATIVE.sub('', rest)))
+    if negative == positive:
+        return None
+    main = 'exclude' if negative else 'include'
+    if not body:
+        return main
+    name = target.rstrip('*')
+    # The exception names the more specific selector; an enclosing hierarchy
+    # that also appears in it as a prefix belongs to the main clause.
+    in_body = re.search(re.escape(name) + r'(?![\w/])', body) is not None
+    if in_body and not (exception and re.search(re.escape(name) + r'(?![\w/])', sentence[:exception.start()])):
+        return 'exclude' if main == 'include' else 'include'
+    return main
+
+
 def merge_task_constraints(spec, extracted, *, design_context=()):
     """Supplement known report checks, never replace task-explicit constraints.
 
@@ -73,6 +111,12 @@ def merge_task_constraints(spec, extracted, *, design_context=()):
                       "wrp_in_shift_en", "wrp_out_shift_en", "wrp_in_capture_en", "wrp_out_capture_en"):
             if kind == 'reset' and re.search(r'(?:无需|无须|不需要|不必)[^。；\n]*(?:reset|复位)[^。；\n]*(?:扫描信号|扫描配置)', quote, re.I):
                 raise ValueError('The cited text says scan reset configuration is not required; do not make it mandatory')
+            if not re.fullmatch(r"[A-Za-z_][\w$]*(?:\[\d+\])?(?:/[\w$\[\]]+)*", target or ""):
+                raise ValueError(f"Signal target {target!r} is not a port or pin name; port-name formats such as scan_data_in_%d are not signals")
+            role_words = {"clock": r"clock|时钟", "reset": r"reset|复位", "scan_enable": r"scan_enable|扫描使能|shift"}.get(kind)
+            if role_words and any(target in sentence and re.search(r"(?:不作为|不是|无需|不需要|没有|不需|并非)[^。；;]*(?:" + role_words + ")", sentence, re.I)
+                                  for sentence in re.split(r"[。；;\n]", quote)):
+                raise ValueError(f"The cited sentence negates the {kind} role for {target!r}; do not extract a negated requirement")
             if kind != "constant":
                 polarities = {"": "", "active_high": "0", "active_low": "1", "inactive_0": "0", "inactive_1": "1"}
                 if value not in polarities:
@@ -112,6 +156,12 @@ def merge_task_constraints(spec, extracted, *, design_context=()):
                     break
             if target not in quote and selected is None and not in_range:
                 raise ValueError(f'Selector {target!r} is absent from the cited lines. Extend line_start/line_end to include BOTH its name/declaration and the membership requirement, including preceding lines when the requirement says this latch/hierarchy')
+            if selected is None:
+                expected = membership_polarity(quote, target)
+                if expected is not None and expected != value:
+                    raise ValueError(f'Scan membership polarity for {target!r} contradicts the cited sentence: it implies {expected}, '
+                                     f'not {value}. In "A 下的所有单元，除了 B，其余均不允许参与" B is include and A is exclude; '
+                                     'an exception clause takes the opposite of the main rule')
             if selected is not None:
                 target = selected['path']
             existing = next((rule for rule in req['scan_membership'] if rule['target'] == target), None)
@@ -125,6 +175,8 @@ def merge_task_constraints(spec, extracted, *, design_context=()):
                       "shared": ("shared", None), "none": ("none", None)}
             if not target or value not in styles:
                 raise ValueError("wrapper_port requires one named port and dedicated/custom/shared/none; generic all-port requirements belong in uncovered")
+            if target.lower() in styles or target.lower() in ("wrapper", "all", "ports"):
+                raise ValueError("wrapper_port target must be an actual port name, not the wrapper style; a style-only wrapper request belongs in uncovered")
             style, cell_type = styles[value]
             existing = next((s for s in req["wrapper_ports"] if s["port"] == target), None)
             if existing:
@@ -149,6 +201,73 @@ def merge_task_constraints(spec, extracted, *, design_context=()):
         # The existing single correction must see all invalid items, not just
         # the first one and then fail again on an unrelated later item.
         raise ValueError("\n".join(errors))
+    # Deterministic membership rules the model may omit or invert: a sentence
+    # naming backticked instance paths with a clear (non-)membership phrase.
+    for line in spec.splitlines():
+        if not re.search(r"扫描链|串链|不可扫描|non-?scan", line, re.I):
+            continue
+        selectors = [s for s in dict.fromkeys(re.findall(r"`([A-Za-z_][\w$]*(?:/[\w$\[\]*]+)+)`", line))
+                     if membership_polarity(line, s) is not None]
+        if selectors:
+            # Model rules citing this sentence through a different (resolved
+            # hierarchy) target contradict its literal selectors; drop them.
+            req["scan_membership"] = [rule for rule in req["scan_membership"]
+                                      if rule["target"] in selectors or line not in rule.get("task_quote", "")]
+        for selector in selectors:
+            value = membership_polarity(line, selector)
+            existing = next((rule for rule in req["scan_membership"] if rule["target"] == selector), None)
+            if existing is not None:
+                existing["value"] = value
+                continue
+            req["scan_membership"].append({"target": selector, "value": value, "task_quote": line,
+                                           "source": "deterministic_sentence_parser"})
+    # A named functional domain excluded from chains without a literal path:
+    # resolve it only when its ASCII keywords select exactly one hierarchy.
+    generic = {"SCAN", "DFT", "FF", "SFF", "DFF", "CHAIN", "ICG", "RAM", "TOP", "CPU"}
+    for line in spec.splitlines():
+        if "`" in line and re.search(r"`[\w$]+(?:/[\w$\[\]*]+)+`", line):
+            continue
+        if not re.search(r"(?:不纳入|不参与|不允许参与|不得参与|排除出?)[^。；;\n]*扫描链", line):
+            continue
+        tokens = {w.lower() for w in re.findall(r"[A-Za-z][A-Za-z0-9]{2,}", line) if w.upper() not in generic}
+        if not tokens:
+            continue
+        matches = [item for item in design_context
+                   if all(t in item["path"].rsplit("/", 1)[-1].lower() for t in tokens)]
+        if len(matches) != 1 or any(rule["target"] == matches[0]["path"] for rule in req["scan_membership"]):
+            continue
+        req["scan_membership"].append({"target": matches[0]["path"], "value": "exclude", "task_quote": line,
+                                       "source_selector": matches[0]["selector"], "module_type": matches[0]["type"],
+                                       "source": "deterministic_domain_parser"})
+    # Clear mixing statements decide mix_clocks/mix_edges; models have
+    # inverted "保持时钟域与时钟沿分离" into mixing allowed.
+    for line in spec.splitlines():
+        if re.search(r"分离|(?:不|不得|不允许|不能|禁止)混合|不得跨|不跨", line):
+            value = "False"
+        elif re.search(r"允许[^。；;\n]*混合|可以[^。；;\n]*混合|可混合", line):
+            value = "True"
+        else:
+            continue
+        if re.search(r"时钟域|clock domain", line, re.I):
+            req["config"]["mix_clocks"] = value
+        if re.search(r"时钟沿|边沿|触发沿|clock edge", line, re.I):
+            req["config"]["mix_edges"] = value
+    # A scan enable explicitly controlling both SFF shift/capture and ICGs
+    # has usage all, whatever single usage a model extraction chose.
+    for signal in req["signals"]:
+        if signal.get("role") != "scan_enable":
+            continue
+        for sentence in re.split(r"[；;\n]", spec):
+            if f"`{signal['port']}`" not in sentence or not re.search(r"ICG|门控", sentence, re.I):
+                continue
+            # Both duties -> all; an ICG-only duty (e.g. keeping ICGs open
+            # during shift) -> clock_gating.
+            if re.search(r"shift|capture|移位|捕获", sentence.replace("移位阶段", ""), re.I):
+                signal["usage"] = "all"
+                break
+            if re.search(r"保持导通|导通|打开|使能所有|enable all", sentence, re.I):
+                signal["usage"] = "clock_gating"
+                break
     return req
 
 
@@ -213,13 +332,15 @@ def extract_task_constraints(spec, generate, timeout, target, *, design_context=
         "contract: OMIT these from output_file, even when listed in the task's output table. "
         "cell_mapping uses target=original FF cell name, value=required scan replacement cell name. "
         "Copy the cell identifiers literally from the task, including a suffix-only abbreviation when "
-        "the task uses one. Both target and value must appear verbatim in the cited lines; never add "
-        "a library prefix absent from those lines. Actual library names will be resolved from the supplied Liberty. Do not "
+        "the task uses one; actual library names will be resolved from the supplied Liberty. Do not "
         "invent a mapping just because the task asks for scan insertion. "
         "scan_membership uses target=one literal instance path, hierarchy path or wildcard selector "
         "from the task, value=include/exclude. A hierarchy target covers descendants; do not add "
         "wildcards absent from the task quote. For 'exclude hierarchy except PATTERN', extract "
         "BOTH the excluded hierarchy and the included exception pattern. "
+        "Polarity follows the MAIN clause, and the exception takes the opposite: for "
+        "'A 下的所有可扫描单元，除了 B 可匹配到的单元，其余均不允许参与扫描链' A is exclude and B is include; "
+        "for 'A 下的单元除了 B 以外都需要参与' A is include and B is exclude. Re-read the negation before answering. "
         "For an explicit same-prefix numbered range such as item_0 到 item_4 or item_0 至 item_4, "
         "return one constraint for each exact member, not the whole prose range or a broader wildcard. "
         "Cite the object declaration AND its membership rule together when the rule uses a pronoun "
@@ -248,9 +369,10 @@ def extract_task_constraints(spec, generate, timeout, target, *, design_context=
     if design_context:
         context['hierarchy_objects'] = [{key: item[key] for key in ('selector', 'path', 'type')} for item in design_context]
     deadline, prompt, attempts = time.monotonic() + timeout, json.dumps(context, ensure_ascii=False, separators=(',', ':')), []
+    short = timeout <= 240
     path = target / "task_contract.json"
     for attempt in range(2):
-        shape_error = None
+        shape_error, extracted, merge_error = None, None, None
         try:
             raw, usage = generate(prompt, max(1, deadline-time.monotonic()), instruction, output_schema=TASK_CONSTRAINTS)
         except ModelResponseError as exc:
@@ -277,10 +399,21 @@ def extract_task_constraints(spec, generate, timeout, target, *, design_context=
                     extracted[field].append({"quote": quote, **{k: item[k] for k in ("kind", "target", "value")}}
                                             if field == "constraints" else quote)
             record["extraction"] = extracted
+            merge_error = None
             try:
                 requirements = merge_task_constraints(spec, extracted, design_context=design_context)
             except ValueError as exc:
+                merge_error = exc
                 extraction_errors.append(str(exc))
+            if extraction_errors and merge_error is not None and len(extraction_errors) == 1:
+                # Invented output filenames are the common invalid item; they
+                # are not task facts, so drop them now instead of paying a
+                # correction round. Any other invalid item still gets one.
+                lines = str(merge_error).splitlines()
+                if lines and all(re.match(r"constraints\[\d+\] \(output_file,", line) for line in lines) \
+                        and _drop_invalid_constraints(spec, extracted, merge_error, design_context, record):
+                    path.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
+                    return record["requirements"], record["extraction"]["uncovered"]
             if extraction_errors:
                 raise ValueError("\n".join(extraction_errors))
         except ValueError as exc:
@@ -288,14 +421,51 @@ def extract_task_constraints(spec, generate, timeout, target, *, design_context=
             # repeat Scan, or extend the original case deadline for this repair.
             attempts[-1]["validation_error"] = str(exc)
             path.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
-            if attempt or deadline-time.monotonic() <= 30:
-                raise
+            # A correction costs a full model call; on short case deadlines it
+            # has repeatedly consumed the time needed for the actual repair.
+            if attempt or short or deadline-time.monotonic() <= 30:
+                salvaged = shape_error is None and _drop_invalid_constraints(
+                    spec, extracted, merge_error, design_context, record)
+                if not salvaged:
+                    # Never fail the whole case on extraction: keep only the
+                    # deterministic parser's requirements and say so.
+                    record.update(extraction={"constraints": [], "uncovered": []},
+                                  requirements=merge_task_constraints(spec, {"constraints": [], "uncovered": []},
+                                                                      design_context=design_context),
+                                  fallback="model extraction invalid; deterministic parser requirements only")
+                path.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
+                return record["requirements"], record["extraction"]["uncovered"]
             prompt = json.dumps({**context, "invalid_extraction": raw, "validation_error": str(exc),
                 "request": "Correct every listed invalid item. Omit only constraints already enforced by the displayed parser; put other unsupported explicit requirements in the top-level uncovered array."}, ensure_ascii=False, separators=(',', ':'))
             continue
         record["requirements"] = requirements
         path.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
         return requirements, extracted["uncovered"]
+
+
+def _drop_invalid_constraints(spec, extracted, merge_error, design_context, record):
+    """After the single correction, keep the valid constraints instead of
+    failing the whole case.  Each rejected item is still validated (never
+    accepted with relaxed rules); its cited task text moves to uncovered so the
+    plan and verification still see that requirement.  Unindexed errors stay fatal."""
+    if merge_error is None:
+        bad = set()
+    else:
+        lines = str(merge_error).splitlines()
+        bad = {int(m[1]) for m in (re.match(r"constraints\[(\d+)\] ", line) for line in lines) if m}
+        if not bad or any(not re.match(r"constraints\[\d+\] ", line) for line in lines):
+            return False
+    kept = [item for i, item in enumerate(extracted["constraints"]) if i not in bad]
+    dropped = [item for i, item in enumerate(extracted["constraints"]) if i in bad]
+    uncovered = list(extracted["uncovered"]) + [item["quote"] for item in dropped if item["quote"] not in extracted["uncovered"]]
+    salvage = {"constraints": kept, "uncovered": uncovered}
+    try:
+        requirements = merge_task_constraints(spec, salvage, design_context=design_context)
+    except ValueError:
+        return False
+    record.update(extraction=salvage, requirements=requirements,
+                  dropped_constraints=[{**item, "reason": "invalid after correction; cited text kept as uncovered"} for item in dropped])
+    return True
 
 
 def _task_requirements(task_spec):
@@ -761,7 +931,10 @@ def inspect_run(run_dir, script, execution, *, full_insertion, task_spec=None, d
         if not path.is_relative_to(run_dir.resolve()):
             raise ValueError("Output artifact is outside its run")
         if not path.is_file() or not path.stat().st_size:
-            missing.append(name)
+            # Runner-added evidence reports are not deliverables; an absent one
+            # only leaves its dependent check without evidence.
+            if not name.startswith("reports/auto_"):
+                missing.append(name)
         elif path.suffix == ".rpt":
             artifacts[name] = path.read_text(encoding="utf-8", errors="replace")
     log_name = f"{run_dir.name}.log"

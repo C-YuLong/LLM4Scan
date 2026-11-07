@@ -10,7 +10,7 @@ import time
 
 from scan_runner import run_scan, generated_script, record_change, publish_run, resolve_selectors
 from acceptance import STAGES, inspect_run, extract_task_constraints
-from model_contract import TASK2, REPAIR, ModelResponseError, verification as verification_schema
+from model_contract import TASK2, REPAIR, ModelResponseError, prune_invalid_items, strip_extra_fields, validate, verification as verification_schema
 from control_context import component_sources
 from netlist_repair import edited_netlists, repaired_script
 from knowledge_search import retrieve
@@ -285,11 +285,15 @@ def repair(source, target, started, deadline, generate, design_outline):
         relocated = re.sub(r"(?m)^set\s+" + name + r"\s+[^\n]*$", lambda m: f"set {name} {{{value.as_posix()}}}", relocated)
     (target / "diffs").mkdir()
     (target / "diffs/original_to_R1_paths.diff").write_text("".join(difflib.unified_diff(original.splitlines(True), relocated.splitlines(True), fromfile="input/original.dofile", tofile="runs/R1/deliverables/R1.dofile")), encoding="utf-8")
-    first = run_scan(relocated, run1, max(1, deadline - time.monotonic()), source=source)
-    log1 = (run1 / "R1.log").read_text(encoding="utf-8", errors="replace")
     spec = (source / "task_spec.md").read_text(encoding="utf-8")
     modules, instances = design_outline(source)
-    requirements, uncovered = extract_task_constraints(spec, generate, max(1, deadline-time.monotonic()), target, design_context=instances)
+    # Task-only extraction does not depend on R1; overlap it with the Scan run.
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        extraction = pool.submit(extract_task_constraints, spec, generate, max(1, deadline-time.monotonic()), target, design_context=instances)
+        first = run_scan(relocated, run1, max(1, deadline - time.monotonic()), source=source)
+        requirements, uncovered = extraction.result()
+    log1 = (run1 / "R1.log").read_text(encoding="utf-8", errors="replace")
     guide = (Path(__file__).parent / "commands.md").read_text(encoding="utf-8")
     guide += '\nRetrieved knowledge (source/confidence/scope retained):\n' + json.dumps(retrieve(spec + '\n' + log1[:22000]), ensure_ascii=False, separators=(',', ':'))
     instruction = (
@@ -516,12 +520,26 @@ def repair(source, target, started, deadline, generate, design_outline):
     followup_schema['properties']['additional_issues'] = diagnosis_schema['properties']['issues']
     followup_schema['properties']['issue_updates']['items']['properties']['diagnosis'] = diagnosis_schema['properties']['issues']['items']
     for attempt in range(2):
-        shape_error = None
+        shape_error, pruned_items = None, []
         try:
             plan, usage = generate(diagnostic_prompt, max(1, deadline - time.monotonic()), instruction,
                                    output_schema=diagnosis_schema, tool_guide=guide)
         except ModelResponseError as exc:
             plan, usage, shape_error = exc.plan, exc.usage, exc
+            if isinstance(plan, dict):
+                plan, stripped = strip_extra_fields(plan, diagnosis_schema)
+                try:
+                    validate(plan, diagnosis_schema)
+                    shape_error = None
+                except ValueError:
+                    pass
+            if shape_error is not None and isinstance(plan, dict) and deadline - time.monotonic() <= 75:
+                # No time to regenerate: keep the valid items of this answer.
+                try:
+                    plan, pruned_items = prune_invalid_items(plan, diagnosis_schema)
+                    shape_error = None
+                except ValueError:
+                    pass
         gaps = []
         candidate_error = f'Response schema: {shape_error}' if shape_error else None
         if shape_error is None:
@@ -542,13 +560,24 @@ def repair(source, target, started, deadline, generate, design_outline):
             except ValueError as exc:
                 candidate_error = '\n'.join(filter(None, (candidate_error, str(exc))))
         diagnostic_attempts.append({'plan': plan, 'usage': usage, 'coverage_gaps': gaps,
-                                    'candidate_error': candidate_error})
+                                    'candidate_error': candidate_error,
+                                    **({'pruned_invalid_items': pruned_items} if pruned_items else {})})
         total_usage = {key: sum(a['usage'][key] for a in diagnostic_attempts)
                        if all(isinstance(a.get('usage'), dict) and isinstance(a['usage'].get(key), int) for a in diagnostic_attempts) else None
                        for key in ('input_tokens', 'output_tokens', 'total_tokens')}
         (target / 'model_plan.json').write_text(json.dumps({'plan': plan, 'usage': total_usage,
             'diagnostic_attempts': diagnostic_attempts}, ensure_ascii=False, indent=2), encoding='utf-8')
         if not gaps and candidate_error is None:
+            break
+        script_valid = (shape_error is None
+                        and not (candidate_error or '').replace('Diagnosis evidence rejected: ', '', 1).count('\n')
+                        and (candidate_error is None or candidate_error.startswith('Diagnosis evidence rejected: ')))
+        if script_valid and (attempt or deadline - time.monotonic() <= 75):
+            # No time for a correction plus R2 and its verification. The
+            # script itself is valid; run it now. Rejected diagnoses stay
+            # rejected and uncovered gaps stay recorded for verification.
+            diagnostic_attempts[-1]['correction_skipped'] = ('correction already used' if attempt
+                                                             else 'insufficient time before deadline')
             break
         if attempt or deadline-time.monotonic() <= 30:
             if shape_error is not None:
@@ -755,7 +784,12 @@ def repair(source, target, started, deadline, generate, design_outline):
             "issue_update_validation": {'validated': corrected, 'errors': update_errors}},
             ensure_ascii=False, indent=2), encoding="utf-8")
         if additional['rejected_diagnoses'] or corrected['rejected_diagnoses'] or update_errors:
-            raise ValueError('Original diagnosis addition or revision has invalid or duplicate evidence; see saved repair response')
+            # Rejected additions/revisions are discarded (and saved above); the
+            # revised script is still a measured repair candidate worth running.
+            rejected_issues = [item['issue'] for item in additional['rejected_diagnoses'] if 'issue' in item]
+            additional['issues'] = [issue for issue in additional['issues'] if issue not in rejected_issues]
+            if corrected['rejected_diagnoses'] or update_errors:
+                updates, indices, corrected = [], [], {**corrected, 'issues': []}
         if same_candidate and not updates and not additional['issues']:
             # The model explicitly returned no change after a measured failure.
             # Keep that response and failure; another identical Scan is not a repair.
@@ -770,6 +804,19 @@ def repair(source, target, started, deadline, generate, design_outline):
         preserve_diagnoses(additional['issues'])
         plan['issues'].extend(additional['issues'])
         previous = fixed
+    if not success:
+        # Deadline or repair exhausted without model approval. A round that
+        # passed every program check is delivered rather than nothing; the
+        # verifier's disagreement is recorded, not hidden.
+        decision_path = target / "decision_log.json"
+        decision = json.loads(decision_path.read_text(encoding="utf-8"))
+        from scan_agent import _publish_accepted_on_timeout
+        unresolved = [i['issue_id'] for i in history if not i['attempts'][-1]['verify']['resolved']]
+        if _publish_accepted_on_timeout(target, decision, decision_path):
+            decision.update(model_verification="disputed", model_unresolved_issues=unresolved,
+                            summary=f"{decision['final_run']} 通过全部程序验收；模型核验未认可（未解决：{unresolved}）。非完整语义证明。")
+            decision_path.write_text(json.dumps(decision, ensure_ascii=False, indent=2), encoding="utf-8")
+            success = True
     print(json.dumps({"repair_completed": bool(success), "issues": len(history), "rounds": len(runs), "elapsed": round(time.monotonic() - started, 2)}))
     return 0 if success else 1
 

@@ -18,13 +18,110 @@ def resolve_selectors(text, instances):
     return re.sub(r"\[\[H\d+\]\]", lambda match: paths[match[0]], text)
 
 
+_LIB_CELLS = {}
+
+
+def _library_cells(source):
+    key = str(source)
+    if key not in _LIB_CELLS:
+        cells = set()
+        for lib in Path(source).rglob("*.lib"):
+            try:
+                cells.update(re.findall(r'\bcell\s*\(\s*"?([A-Za-z_][\w$]*)"?\s*\)', lib.read_text(encoding="utf-8", errors="replace")))
+            except OSError:
+                pass
+        _LIB_CELLS[key] = cells
+    return _LIB_CELLS[key]
+
+
+def complete_cell_names(source, body):
+    """Expand a suffix-only cell name in set_scan_cell_mapping to the one
+    supplied Liberty cell ending with __SUFFIX (COM-3008 otherwise)."""
+    if "set_scan_cell_mapping" not in body:
+        return body
+    cells = _library_cells(source)
+    def expand(token):
+        if not cells or token in cells:
+            return token
+        matches = [cell for cell in cells if cell.endswith("__" + token)]
+        return matches[0] if len(matches) == 1 else token
+    return re.sub(r"(?m)^(\s*set_scan_cell_mapping\s+)(\S+)(\s+)(\S+)",
+                  lambda m: m[1] + expand(m[2]) + m[3] + expand(m[4]), body)
+
+
+_WRAPPER_ROLES = ("shift_clk", "capture_en", "shift_en", "cti", "cto", "cfi", "cfo")
+
+
+def complete_wrapper_interface(body):
+    """add_dedicated_wrapper_cell_type -interface needs 7 (role pin polarity)
+    triples (COM-3015: exactly 21 elements). Expand role/pin pairs with the
+    documented default polarity h."""
+    def expand(match):
+        tokens = match[2].replace("\\\n", " ").split()
+        if len(tokens) == 14 and set(tokens[0::2]) == set(_WRAPPER_ROLES):
+            tokens = [t for i in range(0, 14, 2) for t in (tokens[i], tokens[i + 1], "h")]
+            return match[1] + "{" + " ".join(tokens) + "}"
+        return match[0]
+    return re.sub(r"(add_dedicated_wrapper_cell_type\b[^\n{]*?(?:\\\n[^\n{]*?)*-interface\s+)\{([^}]*)\}", expand, body)
+
+
 def generated_script(source, run_dir, body):
     """Paths belong to the runner, never to a generated candidate."""
-    if re.search(r"(?m)^\s*set\s+(?:input_dir|out_res_dir|out_rpt_dir)\s", body):
-        raise ValueError("Generated body must not redefine runner-owned paths")
+    body = complete_wrapper_interface(body)
+    # Runner-owned paths: drop a candidate's own definitions instead of
+    # failing the case; the runner's values below always apply.
+    body = re.sub(r"(?m)^\s*set\s+(?:input_dir|out_res_dir|out_rpt_dir)\s[^\n]*\n?", "", body)
+    body = complete_cell_names(source, body)
     return (f'set input_dir {{{source.as_posix()}}}\n'
             f'set out_res_dir {{{(run_dir / "deliverables").as_posix()}}}\n'
-            f'set out_rpt_dir {{{(run_dir / "reports").as_posix()}}}\n' + body)
+            f'set out_rpt_dir {{{(run_dir / "reports").as_posix()}}}\n' + with_evidence_reports(normalize_booleans(body)))
+
+
+def normalize_booleans(body):
+    """The tool accepts only lowercase true/false option values (CMD-0074)."""
+    return re.sub(r"(?m)(\s-[A-Za-z_]\w*\s+)(True|False|TRUE|FALSE)(?=\s|$)", lambda m: m[1] + m[2].lower(), body)
+
+
+# Read-only reports that acceptance needs as evidence: (trigger command or
+# None for every full insertion, report already present, command to add).
+# They only describe the inserted design; they never change insertion.
+EVIDENCE_REPORTS = (
+    (None, r"rpt_scan_cfg\b", 'rpt_scan_cfg -file "$out_rpt_dir/auto_scan_cfg.rpt"'),
+    (None, r"rpt_scan_signal\b", 'rpt_scan_signal -file "$out_rpt_dir/auto_scan_signal.rpt"'),
+    (None, r"rpt_scan_chain\b(?!_)", 'rpt_scan_chain -file "$out_rpt_dir/auto_scan_chain.rpt"'),
+    (None, r"rpt_scan_chain_cell\b", 'rpt_scan_chain_cell -file "$out_rpt_dir/auto_scan_chain_cell.rpt"'),
+    (None, r"rpt_insertion_info\b", 'rpt_insertion_info -file "$out_rpt_dir/auto_insertion_info.rpt"'),
+    (r"set_scan_element\b", r"rpt_scan_element\b[^\n]*-type\s+all\b",
+     'rpt_scan_element -type all -file "$out_rpt_dir/auto_scan_element.rpt"'),
+    (r"add_scan_partition\b", r"rpt_scan_partition\b", 'rpt_scan_partition -file "$out_rpt_dir/auto_scan_partition.rpt"'),
+    (r"set_shift_register\b", r"rpt_shift_register\b", 'rpt_shift_register -file "$out_rpt_dir/auto_shift_register.rpt"'),
+    (r"set_wrapper_cfg\b", r"rpt_wrapper_cfg\b", 'rpt_wrapper_cfg -file "$out_rpt_dir/auto_wrapper_cfg.rpt"'),
+    (r"load_ctl\b|\w*scan_segment\b", r"rpt_scan_segment\b", 'rpt_scan_segment -file "$out_rpt_dir/auto_scan_segment.rpt"'),
+)
+
+
+def with_evidence_reports(body):
+    """Add missing evidence reports after insertion, before the final exit.
+
+    A full insertion that used, e.g., set_scan_element but forgot its report
+    cannot be verified; adding the report is cheaper than a repair round and
+    does not alter any insertion command.  Bodies without insert_dft_logic are
+    returned unchanged.
+    """
+    commands = [line for line in body.splitlines() if not line.lstrip().startswith("#")]
+    text = "\n".join(commands)
+    if not re.search(r"(?m)^\s*insert_dft_logic\b", text):
+        return body
+    added = [command for trigger, present, command in EVIDENCE_REPORTS
+             if (trigger is None or re.search(trigger, text, re.I)) and not re.search(r"(?m)^\s*" + present, text)]
+    if not added:
+        return body
+    block = "# runner: read-only evidence reports missing from the plan\n" + "\n".join(added) + "\n"
+    lines = body.splitlines(True)
+    exits = [i for i, line in enumerate(lines) if re.match(r"\s*exit\b", line)]
+    if not exits:
+        return body + ("" if body.endswith("\n") else "\n") + block
+    return "".join(lines[:exits[-1]]) + block + "".join(lines[exits[-1]:])
 
 
 def record_change(target, old_id, run_id, previous, script, change_id):

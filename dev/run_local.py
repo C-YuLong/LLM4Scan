@@ -1,4 +1,4 @@
-"""Run locally using authorized gproxy/Luna, official DeepSeek Flash, or no model."""
+"""Run in the project Linux runtime using gproxy/Luna, the competition API (.env) or no model."""
 
 import argparse
 import json
@@ -16,30 +16,13 @@ def main():
     output_args = parser.add_mutually_exclusive_group(required=True)
     output_args.add_argument("--output", help="New directory name under dev/results")
     output_args.add_argument("--output-dir", type=Path, help="New explicit directory for an organized local benchmark run")
-    runtime_args = parser.add_mutually_exclusive_group()
-    runtime_args.add_argument("--image", help="Run a built submission image without mounting workspace source")
-    runtime_args.add_argument('--runtime-image', default='localhost/scanscan:dev-runtime',
-                              help='Dependency image used with mounted workspace source')
-    parser.add_argument('--implementation', choices=('submission', 'ourmethod'), default='submission',
-                        help='Select the workspace implementation to run')
-    parser.add_argument('--verifier', choices=('legacy', 'direct_agent', 'guided_agent'),
-                        help='Ourmethod verifier selection')
-    parser.add_argument('--verification-mode', choices=('gate', 'shadow'),
-                        help='Ourmethod verification mode')
-    parser.add_argument('--provider', choices=('gproxy', 'deepseek'), default='gproxy',
-                        help='gproxy/Luna or official DeepSeek Flash; credentials stay provider-specific')
+    parser.add_argument("--image", help="Run a built submission image without mounting workspace source")
     parser.add_argument('--competition-api', action='store_true',
-                        help='Disabled: platform and DashScope credentials are not authorized')
+                        help='Use the official DashScope endpoint with LLM_API_KEY from the gitignored project .env')
     parser.add_argument("--initial-plan", type=Path, help="Development-only replay: seed first response from a saved model plan; subsequent Luna calls remain live")
     parser.add_argument("--tool-dofile", type=Path, help="Development fixture feasibility only: execute this oracle body without a model")
     parser.add_argument('--netlist-edits', type=Path, help='Fixture-only JSON with edits; requires --tool-dofile')
     args = parser.parse_args()
-    if args.competition_api:
-        parser.error('Platform and DashScope credentials will not be read or used.')
-    if args.implementation != 'ourmethod' and (args.verifier or args.verification_mode):
-        parser.error('--verifier and --verification-mode require --implementation ourmethod')
-    if args.implementation == 'ourmethod' and (args.initial_plan or args.tool_dofile or args.netlist_edits):
-        parser.error('The replay and fixture modes currently support submission only')
     if args.netlist_edits and not args.tool_dofile:
         parser.error('--netlist-edits is only allowed for no-model fixture qualification')
     root = Path(__file__).resolve().parents[1]
@@ -48,11 +31,20 @@ def main():
         "SCANINSERTION_LICENSE_SERVER": "8273@121.40.209.111",
         "CASE_ID": args.input_dir.name if args.input_dir else args.case,
     }
-    if not args.tool_dofile and args.provider == 'deepseek':
-        environment.update(LLM_BASE_URL='https://api.deepseek.com',
-                           LLM_API_KEY=os.environ['DEEPSEEK_API_KEY'],
-                           LLM_MODEL='deepseek-flash', LLM_API_MODE='responses',
-                           LLM_REASONING_EFFORT='none')
+    if args.competition_api and args.tool_dofile:
+        parser.error('--competition-api cannot be combined with no-model fixture execution')
+    if args.competition_api:
+        # Official reference .env format; defaults match the fixed competition URL/model.
+        values = {}
+        for line in (root / '.env').read_text(encoding='utf-8').splitlines():
+            key, sep, value = line.strip().partition('=')
+            if sep and not key.startswith('#'):
+                values[key.strip()] = value.strip()
+        if not values.get('LLM_API_KEY'):
+            parser.error('LLM_API_KEY missing from project .env')
+        environment.update(LLM_BASE_URL=values.get('LLM_BASE_URL', 'https://dashscope.aliyuncs.com/compatible-mode/v1'),
+                           LLM_API_KEY=values['LLM_API_KEY'], LLM_MODEL=values.get('LLM_MODEL', 'deepseek-v4-pro'),
+                           LLM_API_MODE='chat_completions')
     elif not args.tool_dofile:
         config_path = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex")) / "config.toml"
         config = tomllib.loads(config_path.read_text(encoding="utf-8"))
@@ -69,25 +61,22 @@ def main():
         raise ValueError("Invalid case")
     destination = args.output_dir.resolve() if args.output_dir else root / "dev/results" / args.output
     destination.mkdir(parents=True, exist_ok=False)
+    windows = os.name == "nt"
     def linux(path):
-        return "/mnt/" + path.drive[0].lower() + path.as_posix()[2:]
+        return "/mnt/" + path.drive[0].lower() + path.as_posix()[2:] if windows else str(path)
     bootstrap = "import os,sys,json; os.environ.update(json.loads(sys.stdin.readline())); os.execv(sys.executable, [sys.executable, '/submission/agent_system'] + sys.argv[1:])"
     container_output = "/output" if args.output_dir else "/results/" + args.output
-    command = [
-        "wsl", "-d", "podman-machine-default", "-u", "user", "--", "podman", "run", "--rm", "-i",
+    engine = ["wsl", "-d", "podman-machine-default", "-u", "user", "--", "podman"] if windows else ["podman"]
+    command = engine + [
+        "run", "--rm", "-i",
         "-v", f"{linux(source)}:/input:ro",
         "-v", f"{linux(destination)}:{container_output}:rw",
-        "--entrypoint", "python3", args.image or args.runtime_image,
+        "--entrypoint", "python3", args.image or "localhost/scanscan:dev-runtime",
         "-c", bootstrap, "-input", "/input", "-output", container_output,
     ]
-    if args.verifier:
-        command += ['--verifier', args.verifier]
-    if args.verification_mode:
-        command += ['--verification-mode', args.verification_mode]
     if not args.image:
         mount_index = command.index("--entrypoint")
-        implementation = 'Ourmethod' if args.implementation == 'ourmethod' else 'submission'
-        command[mount_index:mount_index] = ["-v", f"{linux(root / implementation)}:/submission:ro",
+        command[mount_index:mount_index] = ["-v", f"{linux(root / 'submission')}:/submission:ro",
                                           '-v', f'{linux(root / "knowledge")}:/knowledge:ro']
     if args.initial_plan:
         saved = args.initial_plan.resolve(strict=True)

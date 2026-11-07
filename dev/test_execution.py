@@ -19,6 +19,31 @@ import time
 
 
 @unittest.skipUnless(os.name == "posix", "Submission runs inside the Linux image")
+
+
+class PartitionPolicyTests(unittest.TestCase):
+    def test_unrequested_partitions_counted_only_when_task_has_none(self):
+        body = 'add_scan_partition P1 -clocks {a}\nadd_scan_partition P2 -clocks {b}\n'
+        self.assertEqual(scan_agent.unrequested_partitions('扫描链不得跨时钟域', body), 2)
+        self.assertEqual(scan_agent.unrequested_partitions('| 分区 | chain_count |', body), 0)
+        self.assertEqual(scan_agent.unrequested_partitions('no partitions here', 'insert_dft_logic'), 0)
+
+class EvidenceReportTests(unittest.TestCase):
+    def test_missing_evidence_reports_are_added_before_exit_only_for_insertion(self):
+        from scan_runner import with_evidence_reports
+        body = ('set_scan_element false {u_a/*}\nadd_pseudo_pi {u_b/q}\nexamine_scan_drc\nexamine_scan_chain\n'
+                'insert_dft_logic\nrpt_scan_chain -file "$out_rpt_dir/c.rpt"\nexit\n')
+        out = with_evidence_reports(body)
+        added = out[len(body) - len('exit\n'):-len('exit\n')]
+        self.assertTrue(out.endswith('exit\n'))
+        self.assertIn('rpt_scan_element -type all', added)
+        self.assertNotIn('rpt_pseudo_pi', added)  # unverified after insertion on large designs
+        self.assertNotIn('rpt_scan_chain -file', added)
+        self.assertNotIn('rpt_wrapper_cfg', added)
+        self.assertEqual(with_evidence_reports(out), out)
+        preprocessing = 'set_scan_element false {u_a/*}\nexamine_scan_drc\nexit\n'
+        self.assertEqual(with_evidence_reports(preprocessing), preprocessing)
+
 class ExecutionTests(unittest.TestCase):
     def test_requirement_quote_correction_does_not_rerun_or_change_scan(self):
         line = 'if {[llength $indices] >= 10} {'
@@ -42,7 +67,7 @@ class ExecutionTests(unittest.TestCase):
                         patch.object(scan_agent, 'run_scan', side_effect=run) as runner, \
                         patch.object(scan_agent, 'design_outline', return_value=([], [])), \
                         patch.object(scan_agent, 'inspect_run', return_value=({'accepted': True, 'missing_outputs': [], 'checks': {}}, {}, [])):
-                    self.assertEqual(scan_agent.main(), 0 if corrected else 1)
+                    self.assertEqual(scan_agent.main(), 0)  # an accepted circuit is never lost to a citation typo
                 self.assertEqual(runner.call_count, 1)
                 self.assertEqual(model.call_count, 2)
                 self.assertTrue((target / 'model_requirement_mapping.json').is_file())
@@ -52,7 +77,8 @@ class ExecutionTests(unittest.TestCase):
                     decision = json.loads((target / 'decision_log.json').read_text(encoding='utf-8'))
                     self.assertEqual(decision['requirement_mapping'][0]['dft_config'], line)
                 else:
-                    self.assertFalse((target / 'final_results').exists())
+                    self.assertTrue((target / 'final_results').exists())
+                    self.assertTrue((target / 'unmapped_requirements.json').is_file())
 
     def test_task1_semantic_failure_retries_completed_tool_run(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -126,8 +152,8 @@ class ExecutionTests(unittest.TestCase):
             body = 'dump_netlist -file "$out_res_dir/post.v"'
             script = scan_runner.generated_script(root, run, body)
             for variable in ("input_dir", "out_res_dir", "out_rpt_dir"):
-                with self.assertRaises(ValueError):
-                    scan_runner.generated_script(root, run, f"set {variable} old_round\n" + body)
+                # A candidate's own path definition is dropped; runner paths win.
+                self.assertEqual(scan_runner.generated_script(root, run, f"set {variable} old_round\n" + body), script)
             result, _, _ = inspect_run(run, script, {"exit_status": "completed"}, full_insertion=False)
             self.assertTrue(result["accepted"])
             self.assertNotIn("reported_drc_zero", result["checks"])

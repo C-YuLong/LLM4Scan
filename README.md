@@ -1,26 +1,6 @@
 # ScanScan：Scan Insertion 智能体开发
 
-## 合并后的运行入口
-
-`main` 已合并 `development_zwy` 的 `Ourmethod/`。`submission/` 保留本地任务约束、网表修复与 EQY、诊断和验收增强；`Ourmethod/` 提供独立的 generator → Scan → Verify → 反馈修复流程，以及 direct/guided 模型核验。两套实现尚未统一运行时，默认仍使用 `submission/`。
-
-本机通过同一个启动器选择实现和已授权的模型服务，默认 gproxy/Luna；`--provider deepseek` 使用 DeepSeek 官方 Flash：
-
-```powershell
-python -X utf8 dev/run_local.py --case task_1/case4 --output new_submission_run
-python -X utf8 dev/run_local.py --provider deepseek --case task_1/case4 --output new_flash_run
-python -X utf8 dev/run_local.py --implementation ourmethod --runtime-image localhost/scanscan:ourmethod --verifier guided_agent --verification-mode gate --case task_1/case4 --output new_ourmethod_run
-```
-
-`Ourmethod` 的模型核验目前仅支持 Task 1，需要其 [运行依赖](Ourmethod/README.md)，包括 Yosys、OpenSTA、tclint 和 pyslang；先按 [Dockerfile](Ourmethod/Dockerfile) 构建上述依赖镜像。`--runtime-image` 挂载当前源码，`--image` 则执行镜像内的冻结代码。配置默认使用 Responses；带 `deepseek_strict` 的示例不适用于 gproxy/Luna。模型核验保留 PASS、FAIL、UNKNOWN；单项通过不代表全任务通过。实验记录和完整结果留在本地 `dev/results/`，不纳入仓库。
-
-本次 [合并实验](dev/分支合并实验_20261107.md)：Luna 下原有实现的 T1/C4、T2/C1 均通过独立验收；同一 T1/C4 的 Ourmethod guided、direct 候选通过 6 项结构检查，但全任务核验均为 UNKNOWN，未发布。guided 未在预算内核验完全部要求，direct 最终引用行号无效；不据此宣称新核验器已完成整例交付。
-
-随后已修复最终引用纠错、发布前文件说明、guided 重复建立问题，以及 direct 因任意失败谓词提前结束查证的问题，5 项离线回归通过。Luna 同例重测仍未完成交付：guided 为 4 PASS / 4 UNKNOWN；direct 又把 PLL 外应转为扫描 FF 的要求反向解释，触发两轮误判与修复，最后核验超时。详见同一实验记录的修复重测部分。
-
-DeepSeek 官方 Flash 最新小范围批次：关闭推理并明确 JSON 格式后，`submission` 的 T1/C4、T2/C1 均通过运行及独立验收，含审计分别 28.517、44.146 秒。zwy 同一冻结候选的 direct 核验仍为 UNKNOWN，51.903 秒；全 12 例未测。此前格式/提取失败全部保留，详见同一[实验记录](dev/分支合并实验_20261107.md)的 Flash 部分。
-
-当前授权限制：用户允许本地 gproxy/Luna 和 DeepSeek 官方 Flash 测试，无需逐次确认。显式 `--provider deepseek` 固定使用 `https://api.deepseek.com`、`deepseek-flash`、Responses 协议和环境变量 `DEEPSEEK_API_KEY`，并设置 `reasoning.effort=none`；默认 gproxy 仍核对原配置后读取 `CODEX_KEY`。凭据仅经 stdin 注入对应服务，不写入仓库或命令参数，不自动切换服务。百炼及其他未授权 Key、平台登录、凭据打包和提交仍保持阻断；本地 Flash 测试不等于平台指定模型验证。下文其他外部 API 等历史流程不是当前执行授权。详见 [AGENTS.md](AGENTS.md)。
+当前授权限制：用户已明确允许项目开发和测试直接调用 gproxy，无需逐次确认；测试模型仍按此前要求使用 Luna，百炼及其他 Key 仍禁止读取或使用。本地启动器已恢复仅限 gproxy 的入口，在读取 Key 前核对地址、协议及凭据变量名，不会自动切换服务。官方公开平台仍禁止其他模型，并会忽略自定义 URL/model，所以本地调用授权不代表可以上传 Luna 或把 gproxy Key 发往百炼；凭据打包及平台登录入口保持阻断。下文提交、充值及其他外部 API 验证等历史流程不是当前执行授权。详见 [AGENTS.md](AGENTS.md)。
 
 历史 demo-rc4 已交付 11 个公开案例的本地端到端 Demo，按《Scan_Insertion竞赛冲冠实现方案.md》开发；不是当前版本正式模型的通过成绩。
 使用官方 `scan-agent-base:ubuntu24` 中的真实 Scan 工具，本地模型按用户要求使用 `gpt-5.6-luna`。
@@ -125,7 +105,7 @@ Task 2 不再反向导入主入口；初始化和总时限只由入口管理。�
 - 原始日志、每轮 dofile、diff、实际网表/报告、决策引用与最终副本。
 - 检查日志中的 ERROR，而不只检查退出码；总时间预算与 Scan 进程组超时终止。
 - 接口异常、工具启动失败、总时限中止均落盘失败决策；Scan 中止保留 execution.json，旧结果目录拒绝覆盖。
-- 只读输入挂载；凭据从所选授权服务的环境变量读取，经 stdin 注入容器，不落盘。
+- 只读输入挂载；凭据从当前 Codex provider 的环境变量读取，经 stdin 注入容器，不落盘。
 - 独立 Yosys 结构验收脚本，用于 T1/C1、C4。它不是 LEC，也不是通用 Verilog 分析器。
 - Task 2 在线程序检查实际阶段顺序和 DRC 报告；任务明确要求零违例时，非零或缺失总数不能被模型意见放行。未要求零值时保留任务相关的警告核验，不擅自放宽其他用例。
 
@@ -147,7 +127,7 @@ python .\dev\verify_flow.py --output dev/results/t2c4_new_run --cv32e40p
 ```
 
 `--output` 指定 `dev/results/` 中的新目录；已有结果不会被覆盖。
-本地启动器默认选择用户级 Codex `config.toml` 中名为 `gproxy` 的 provider，核对 `https://gproxy.lin.pub/codex/v1`、Responses 协议及 `CODEX_KEY` 变量名后才读取该变量；不跟随其他当前 provider。显式 `--provider deepseek` 则仅从 `DEEPSEEK_API_KEY` 读取官方 Flash 凭据，不读取 Codex 配置。凭据仅经 stdin 注入容器，不写入命令参数或结果文件。
+本地启动器只选择用户级 Codex `config.toml` 中名为 `gproxy` 的 provider，核对 `https://gproxy.lin.pub/codex/v1`、Responses 协议及 `CODEX_KEY` 变量名后才读取该变量；不跟随其他当前 provider，也不读取其他服务 Key。凭据仅经 stdin 注入容器，不写入命令参数或结果文件。
 官方 License 地址来自提供的参考 README。该启动器为本地开发用途，不放入提交镜像。
 
 从当前源码构建同样的提交入口（以下使用新标签，不覆盖交付镜像）：
@@ -158,7 +138,7 @@ wsl -d podman-machine-default -u user -- podman build --pull=never -t localhost/
 
 镜像复制 `submission/` 与项目编写的 `knowledge/`，并安装基础镜像中 EQY 缺少的 make；不包含账号文件、官方数据、Codex 配置或测试输出。
 正式运行需注入 `LLM_BASE_URL`、`LLM_API_KEY`、`LLM_MODEL` 和 `SCANINSERTION_LICENSE_SERVER`。
-客户端默认使用比赛示例的 Chat Completions 协议；本地启动器为 Luna 和官方 Flash 显式设置 `LLM_API_MODE=responses`。不会自动切换模型或供应商。`dev/run_local.py --competition-api` 当前直接拒绝，不读取百炼 Key。此前指定模型本地 T1/C4、T2/C1 以及正式提交 3738 的 3/11 均为历史记录，不代表本轮测试。
+客户端默认使用比赛示例的 Chat Completions 协议；`LLM_API_MODE=responses` 用于本地 Luna，启动器会显式设置。不会自动切换模型或供应商。`dev/run_local.py --competition-api` 当前直接拒绝，不读取百炼 Key。此前指定模型本地 T1/C4、T2/C1 以及正式提交 3738 的 3/11 均为历史记录，不代表本轮 gproxy 测试。
 
 正式 ZIP 打包入口 `dev/package_submission.py` 当前已禁用，不能使用 gproxy 授权恢复百炼凭据打包。历史私有包内含凭据，不要上传 GitHub、共享或复用提交。`.env` 不写入镜像。
 

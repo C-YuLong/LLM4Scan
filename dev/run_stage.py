@@ -6,6 +6,7 @@ small and records execution and independent acceptance separately.
 
 import argparse
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -26,6 +27,8 @@ def _tokens(result_dir):
         paths = [path for path in paths if path.name != "verification.json"]
     for path in paths:
         value = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(value, dict):
+            continue
         if path.name == 'decision_log.json' and value.get('failure_type') in {'HTTPError', 'TimeoutError'}:
             records.append({'file': path.name, 'unknown_usage_reason': 'Failed or interrupted run may have requests without returned usage',
                             'failure_type': value['failure_type'], 'http_status': value.get('http_status')})
@@ -96,11 +99,12 @@ def _audit(root, result_dir, case):
             data = json.loads(acceptance.read_text(encoding="utf-8"))
             checks = data.get("checks", {})
             if case in ("task_1/case1", "task_1/case4") and checks.get("accepted_final_run"):
+                windows = os.name == "nt"
                 def linux(path):
-                    return "/mnt/" + path.drive[0].lower() + path.as_posix()[2:]
+                    return "/mnt/" + path.drive[0].lower() + path.as_posix()[2:] if windows else str(path)
                 source = root / "official/extracted/public_cases" / case / "input"
                 structural = subprocess.run([
-                    "wsl", "-d", "podman-machine-default", "-u", "user", "--", "podman", "run", "--rm", "--memory", "2g", "--cpus", "2",
+                    *(["wsl", "-d", "podman-machine-default", "-u", "user", "--"] if windows else []), "podman", "run", "--rm", "--memory", "2g", "--cpus", "2",
                     "-v", f"{linux(root / 'dev')}:/devwork:rw", "-v", f"{linux(source)}:/input:ro",
                     "--entrypoint", "python3", "docker.io/library/scan-agent-base:ubuntu24",
                     "/devwork/verify_preprocessing.py", "--output", "/devwork/results/" + result_dir.name,
@@ -127,10 +131,9 @@ def main():
     available = sorted(path.parent.relative_to(public_root).as_posix()
                        for path in public_root.glob("task_*/case*/input") if path.is_dir())
     parser.add_argument("--cases", nargs="+", default=list(DEFAULT_CASES), choices=available)
+    parser.add_argument("--competition-api", action="store_true", help="Pass through to run_local: use DashScope key from .env")
     parser.add_argument("--output-prefix", help="Unique prefix for per-case directories")
     parser.add_argument("--image", help="Use this built submission image for every case")
-    parser.add_argument('--provider', choices=('gproxy', 'deepseek'), default='gproxy',
-                        help='Use the selected authorized provider for every case')
     args = parser.parse_args()
     results = root / "dev" / "results"
     prefix = args.output_prefix or ("stage_" + datetime.now().strftime("%Y%m%d_%H%M%S"))
@@ -146,7 +149,7 @@ def main():
         raise SystemExit(str(exc))
     records = []
     def save_summary():
-        summary = {"prefix": prefix, "image": args.image, "provider": args.provider, "cases": records,
+        summary = {"prefix": prefix, "image": args.image, "cases": records,
                    "requested_cases": list(args.cases), "finished": len(records) == len(args.cases),
                    "failed_cases": [r["case"] for r in records if r["exit_code"] != 0 or
                                     r["independent_acceptance"].get("passed") is not True or
@@ -158,10 +161,11 @@ def main():
     for case, name in zip(args.cases, names):
         output = results / name
         started = time.monotonic()
-        command = [sys.executable, str(root / "dev" / "run_local.py"), "--case", case,
-                   "--output", name, '--provider', args.provider]
+        command = [sys.executable, str(root / "dev" / "run_local.py"), "--case", case, "--output", name]
         if args.image:
             command.extend(["--image", args.image])
+        if args.competition_api:
+            command.append("--competition-api")
         completed = subprocess.run(command, cwd=root)
         audit = _audit(root, output, case) if output.is_dir() else {"supported": True, "passed": False,
                                                                       "error": "runner produced no result directory"}

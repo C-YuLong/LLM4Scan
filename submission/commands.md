@@ -121,6 +121,9 @@ the required registers too. Verify actual chain membership in exported CTL.
 
 off_state means inactive level, not active level. scan_enable usage all controls both FF SE and ICG.
 For reset, active-high means off_state 0; active-low means off_state 1.
+Symptom: DFTR3 (Reset input of DFF is uncontrolled) on most FFs after a reset
+declaration means its off_state is the active level; for an active-low reset
+(the task says low-active, or the original/golden evidence shows off_state 1) use -off_state 1.
 When ORIGINAL DRC includes uncontrolled set/reset inputs (DFTR2/DFTR3), inspect
 the supplied Liberty clear/preset function and the actual upstream connection
 even if the task does not state a polarity. Do not repair only the simultaneous
@@ -210,6 +213,12 @@ not a requirement that same-edge/same-clock chains contain extra lockup cells.
 
 Partition and cascaded-clock flows (manual PDF pages 17, 44–47;
 clock_gating_init_cycles syntax additionally confirmed in official development examples):
+Create custom partitions ONLY when the task explicitly names partitions or
+requires per-partition settings. "Do not cross clock domains" and independent
+pseudo-PI clock domains are already satisfied by the default -mix_clocks false,
+which splits chains by clock in Default_Partition. Observed: one custom partition
+per clock on a ~600k-cell design made dump_ctl run for over an hour (stuck in CTL
+scan-cell lookup) after a normal insertion, exhausting the case deadline.
 add_scan_partition NAME -clocks {SOURCE_CLOCK}
 Default_Partition is a PREDEFINED reserved partition containing the design's
 instances, not a user partition to create. Never add/delete/redefine it.

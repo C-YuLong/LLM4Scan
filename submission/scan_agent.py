@@ -76,10 +76,42 @@ def main():
                 for result in [json.loads(path.read_text(encoding="utf-8"))]
             ]
             decision_path.write_text(json.dumps(decision, ensure_ascii=False, indent=2), encoding="utf-8")
+            # Any later failure (deadline, model output, a rejected follow-up
+            # candidate) must not discard a round that passed every program check.
+            if _publish_accepted_on_timeout(target, decision, decision_path):
+                print(json.dumps({"execution_complete": True, "model_verification": "incomplete", "failure_type": type(exc).__name__}))
+                return 0
         print(json.dumps({"execution_complete": False, "failure_type": type(exc).__name__}))
         return 1
     finally:
         signal.setitimer(signal.ITIMER_REAL, 0)
+
+
+def _publish_accepted_on_timeout(target, decision, decision_path):
+    """The case deadline expired after a completed round already passed every
+    program acceptance check (typically while the model verification call was
+    still running).  Deliver that round rather than nothing, and say plainly
+    that model verification did not finish.  A round with any failed program
+    check is never published here."""
+    accepted = []
+    for path in sorted((target / "runs").glob("R*/acceptance.json"), key=lambda p: int(p.parent.name[1:])):
+        value = json.loads(path.read_text(encoding="utf-8"))
+        checks = value.get("checks", {})
+        execution = path.parent / "execution.json"
+        if (value.get("accepted") is True and checks and all(v is True for v in checks.values())
+                and execution.is_file() and json.loads(execution.read_text(encoding="utf-8")).get("exit_status") == "completed"):
+            accepted.append(path.parent)
+    if not accepted or (target / "final_results").exists():
+        return False
+    run = accepted[-1]
+    publish_run(target, run)
+    decision.update({
+        "final_run": run.name,
+        "summary": f"{run.name} 通过全部程序验收；后续步骤（{decision.get('failure_type')}）在模型核验认可前中止，模型核验未完成。非完整语义证明。",
+        "model_verification": "incomplete_deadline" if decision.get("failure_type") == "TimeoutError" else "incomplete_after_error",
+    })
+    decision_path.write_text(json.dumps(decision, ensure_ascii=False, indent=2), encoding="utf-8")
+    return True
 
 
 def arm_deadline(limitations, started):
@@ -251,7 +283,7 @@ def generate(prompt, timeout, instructions=None, output_schema=TASK1, *, tool_gu
             "object scopes: ICG exclusions and non-scannable FF hierarchies are separate requirements."
         ),
         "input": prompt,
-        "reasoning": {"effort": os.environ.get('LLM_REASONING_EFFORT') or ("low" if timeout <= 180 else "medium")},
+        "reasoning": {"effort": "low" if timeout <= 180 else "medium"},
         "stream": True,
         "store": False,
         "text": {"format": {"type": "json_schema", "name": "scan_response", "strict": True, "schema": output_schema}},
@@ -262,14 +294,10 @@ def generate(prompt, timeout, instructions=None, output_schema=TASK1, *, tool_gu
         payload['instructions'] = (
             'Tool reference for syntax; it does not override the actual task requirements.\n'
             + tool_guide + '\n\nCurrent task instructions:\n' + payload['instructions'])
-    payload['instructions'] += (
-        '\nReturn only a JSON object conforming to this schema. No Markdown fences or commentary. '
-        'Escape quotes and newlines inside string values exactly once for JSON; do not double-encode the object.\n'
-        + json.dumps(output_schema, separators=(',', ':')))
     protocol = os.environ.get('LLM_API_MODE', 'chat_completions')
     if protocol == 'chat_completions':
         payload = {'model': payload['model'], 'messages': [
-            {'role': 'system', 'content': payload['instructions']},
+            {'role': 'system', 'content': payload['instructions'] + '\nReturn only a JSON object conforming to this schema:\n' + json.dumps(output_schema, separators=(',', ':'))},
             {'role': 'user', 'content': prompt}]}
         # DashScope's fixed competition model maps low effort to high. Its
         # documented non-thinking mode leaves time for Scan and verification
@@ -328,30 +356,46 @@ def generate(prompt, timeout, instructions=None, output_schema=TASK1, *, tool_gu
             raise ModelResponseError('Chat completion did not finish normally', content, usage)
         if not isinstance(content, str):
             raise ModelResponseError('Chat content must be a JSON string', content, usage)
-    else:
-        content = "".join(c["text"] for item in completed.get("output", []) for c in item.get("content", []) if c.get("type") == "output_text")
-        usage = completed.get("usage")
+        try:
+            plan = json.loads(content)
+        except json.JSONDecodeError as exc:
+            raise ModelResponseError(f'Invalid JSON at line {exc.lineno}, column {exc.colno}', content, usage) from exc
+        from model_contract import validate, strip_extra_fields
+        if isinstance(plan, dict):
+            plan, _ = strip_extra_fields(plan, output_schema)
+        try:
+            validate(plan, output_schema)
+        except ValueError as exc:
+            raise ModelResponseError(str(exc), plan, usage) from exc
+        return plan, usage
+    text = "".join(c["text"] for item in completed.get("output", []) for c in item.get("content", []) if c.get("type") == "output_text")
+    usage = completed.get("usage")
     if failed_http and usage is not None:
         usage["failed_http_statuses"] = failed_http
-    try:
-        plan = json.loads(content)
-    except json.JSONDecodeError as exc:
-        raise ModelResponseError(f'Invalid JSON at line {exc.lineno}, column {exc.colno}', content, usage) from exc
-    from model_contract import validate
-    try:
-        validate(plan, output_schema)
-    except ValueError as exc:
-        raise ModelResponseError(str(exc), plan, usage) from exc
-    return plan, usage
+    return json.loads(text), usage
 
 
-def requirement_mappings(requirements, script, instances):
-    """Bind requirement commands to exact text in the final executed script."""
+def unrequested_partitions(specification, dofile):
+    """Count custom partitions in a plan whose task never mentions partitions."""
+    if re.search(r"分区|partition", specification, re.I):
+        return 0
+    return len(re.findall(r"(?m)^\s*add_scan_partition\b", dofile))
+
+
+def requirement_mappings(requirements, script, instances, *, unmatched=None):
+    """Bind requirement commands to exact text in the final executed script.
+
+    With an ``unmatched`` list, citations absent from the script are recorded
+    there and skipped instead of failing an already accepted circuit."""
     mappings = []
     for index, requirement in enumerate(requirements, 1):
         command = resolve_selectors(requirement['command'], instances)
         commands = [command] if command in script and command else command.splitlines()
         if not commands or any(not item.strip() or item not in script for item in commands):
+            if unmatched is not None:
+                unmatched.append({'requirement': requirement['requirement'], 'command': command,
+                                  'reason': 'citation absent from executed dofile; not mapped'})
+                continue
             raise ValueError(f'Requirement {index} command is absent from generated dofile: {command}')
         for item in commands:
             line = script[:script.index(item)].count('\n') + 1
@@ -359,6 +403,30 @@ def requirement_mappings(requirements, script, instances):
                              'config_ref': {'source': 'final_results/deliverables/final.dofile',
                                             'locator': f'L{line}'}})
     return mappings
+
+
+def _corrected_mappings(target, plan, script, instances, deadline, exc, unmatched):
+    # The circuit already passed. Correct only the report's references,
+    # never re-run Scan or replace the accepted script for a quote typo.
+    count = len(plan['requirements'])
+    correction, correction_usage = generate(json.dumps({
+        'executed_dofile': script, 'requirements': plan['requirements'],
+        'citation_error': str(exc)}, ensure_ascii=False, separators=(',', ':')),
+        deadline - time.monotonic(),
+        'Correct requirement citations against the immutable executed_dofile. '
+        'Return one exact command substring for EVERY requirement, in the same order. '
+        'Copy the actual syntax, including braces and brackets; do not repair or paraphrase it. '
+        'For nonadjacent statements, separate exact quotations with newlines. '
+        'Return an empty string if the script does not implement that requirement. '
+        'Do not change the requirements or the script.',
+        output_schema=record({'commands': {'type': 'array', 'minItems': count,
+                                           'maxItems': count, 'items': STRING}}))
+    (target / 'model_requirement_mapping.json').write_text(json.dumps({
+        'correction': correction, 'usage': correction_usage,
+        'original_error': str(exc)}, ensure_ascii=False, indent=2), encoding='utf-8')
+    corrected = [{**requirement, 'command': command}
+                 for requirement, command in zip(plan['requirements'], correction['commands'], strict=True)]
+    return requirement_mappings(corrected, script, instances, unmatched=unmatched)
 
 
 def execute(args):
@@ -383,6 +451,25 @@ def execute(args):
     components = component_sources(source)
     prompt = json.dumps({"task_spec": specification, "task_contract": requirements, "full_insertion": full_insertion, "limitations": limitations, "files": files, "module_declarations": modules, "hierarchical_instances": instances, "component_sources": components}, ensure_ascii=False, separators=(',', ':'))
     plan, usage = generate(prompt, max(1, deadline - time.monotonic()), tool_guide=guide)
+    unrequested = unrequested_partitions(specification, plan["dofile"])
+    if unrequested and deadline - time.monotonic() > 600:
+        # Per-clock custom partitions on a large design hung dump_ctl for over
+        # an hour (T1/C5). Regenerate once before spending a Scan run on it.
+        first_plan = plan
+        plan, retry_usage = generate(json.dumps({**json.loads(prompt), "rejected_plan": {
+            "dofile": first_plan["dofile"],
+            "reason": ("The task does not request scan partitions, but this plan creates "
+                       f"{unrequested} custom partition(s). Keep every chain in Default_Partition: "
+                       "-mix_clocks false already separates clock domains, including pseudo-PI clocks. "
+                       "Remove add_scan_partition / set_current_scan_partition and per-partition loops; "
+                       "declare each scan enable once.")}}, ensure_ascii=False, separators=(',', ':')),
+            max(1, deadline - time.monotonic()), tool_guide=guide)
+        usage = {"initial": usage, "partition_regeneration": retry_usage,
+                 **{key: sum(u.get(key) or 0 for u in (usage, retry_usage) if isinstance(u, dict))
+                    for key in ("input_tokens", "output_tokens", "total_tokens")}}
+        plan.setdefault("repair", {"located_object": "", "root_cause": "", "action": ""})
+        (target / "model_plan_rejected_partitions.json").write_text(json.dumps(
+            {"plan": first_plan, "unrequested_partitions": unrequested}, ensure_ascii=False, indent=2), encoding="utf-8")
     (target / "model_plan.json").write_text(json.dumps({"plan": plan, "usage": usage}, ensure_ascii=False, indent=2), encoding="utf-8")
     run_dir = target / "runs/R1"
     script = generated_script(source, run_dir, resolve_selectors(plan["dofile"], instances))
@@ -441,29 +528,17 @@ def execute(args):
         try:
             mappings = requirement_mappings(plan['requirements'], script, instances)
         except ValueError as exc:
-            if deadline - time.monotonic() <= 30:
-                raise
-            # The circuit already passed. Correct only the report's references,
-            # never re-run Scan or replace the accepted script for a quote typo.
-            count = len(plan['requirements'])
-            correction, correction_usage = generate(json.dumps({
-                'executed_dofile': script, 'requirements': plan['requirements'],
-                'citation_error': str(exc)}, ensure_ascii=False, separators=(',', ':')),
-                deadline - time.monotonic(),
-                'Correct requirement citations against the immutable executed_dofile. '
-                'Return one exact command substring for EVERY requirement, in the same order. '
-                'Copy the actual syntax, including braces and brackets; do not repair or paraphrase it. '
-                'For nonadjacent statements, separate exact quotations with newlines. '
-                'Return an empty string if the script does not implement that requirement. '
-                'Do not change the requirements or the script.',
-                output_schema=record({'commands': {'type': 'array', 'minItems': count,
-                                                   'maxItems': count, 'items': STRING}}))
-            (target / 'model_requirement_mapping.json').write_text(json.dumps({
-                'correction': correction, 'usage': correction_usage,
-                'original_error': str(exc)}, ensure_ascii=False, indent=2), encoding='utf-8')
-            corrected = [{**requirement, 'command': command}
-                         for requirement, command in zip(plan['requirements'], correction['commands'], strict=True)]
-            mappings = requirement_mappings(corrected, script, instances)
+            unmatched = []
+            if deadline - time.monotonic() <= 45:
+                mappings = requirement_mappings(plan['requirements'], script, instances, unmatched=unmatched)
+            else:
+                try:
+                    mappings = _corrected_mappings(target, plan, script, instances, deadline, exc, unmatched)
+                except (ValueError, ModelResponseError, OSError):
+                    unmatched.clear()
+                    mappings = requirement_mappings(plan['requirements'], script, instances, unmatched=unmatched)
+            if unmatched:
+                (target / 'unmapped_requirements.json').write_text(json.dumps(unmatched, ensure_ascii=False, indent=2), encoding='utf-8')
         publish_run(target, run_dir)
     decision = {
         "case_id": os.environ.get("CASE_ID", source.parent.name or source.name), "task": "task1", "final_run": run_id if success else None,
