@@ -6,6 +6,7 @@ small and records execution and independent acceptance separately.
 
 import argparse
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -96,11 +97,12 @@ def _audit(root, result_dir, case):
             data = json.loads(acceptance.read_text(encoding="utf-8"))
             checks = data.get("checks", {})
             if case in ("task_1/case1", "task_1/case4") and checks.get("accepted_final_run"):
+                windows = os.name == "nt"
                 def linux(path):
-                    return "/mnt/" + path.drive[0].lower() + path.as_posix()[2:]
+                    return "/mnt/" + path.drive[0].lower() + path.as_posix()[2:] if windows else str(path)
                 source = root / "official/extracted/public_cases" / case / "input"
                 structural = subprocess.run([
-                    "wsl", "-d", "podman-machine-default", "-u", "user", "--", "podman", "run", "--rm", "--memory", "2g", "--cpus", "2",
+                    *(["wsl", "-d", "podman-machine-default", "-u", "user", "--"] if windows else []), "podman", "run", "--rm", "--memory", "2g", "--cpus", "2",
                     "-v", f"{linux(root / 'dev')}:/devwork:rw", "-v", f"{linux(source)}:/input:ro",
                     "--entrypoint", "python3", "docker.io/library/scan-agent-base:ubuntu24",
                     "/devwork/verify_preprocessing.py", "--output", "/devwork/results/" + result_dir.name,
@@ -127,6 +129,7 @@ def main():
     available = sorted(path.parent.relative_to(public_root).as_posix()
                        for path in public_root.glob("task_*/case*/input") if path.is_dir())
     parser.add_argument("--cases", nargs="+", default=list(DEFAULT_CASES), choices=available)
+    parser.add_argument("--competition-api", action="store_true", help="Pass through to run_local: use DashScope key from .env")
     parser.add_argument("--output-prefix", help="Unique prefix for per-case directories")
     parser.add_argument("--image", help="Use this built submission image for every case")
     args = parser.parse_args()
@@ -159,6 +162,8 @@ def main():
         command = [sys.executable, str(root / "dev" / "run_local.py"), "--case", case, "--output", name]
         if args.image:
             command.extend(["--image", args.image])
+        if args.competition_api:
+            command.append("--competition-api")
         completed = subprocess.run(command, cwd=root)
         audit = _audit(root, output, case) if output.is_dir() else {"supported": True, "passed": False,
                                                                       "error": "runner produced no result directory"}

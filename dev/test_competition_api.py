@@ -17,8 +17,7 @@ class LocalApiAuthorizationTests(unittest.TestCase):
     def test_rejects_other_credentials_before_read_or_launch(self):
         provider = {'base_url': 'https://gproxy.lin.pub/codex/v1',
                     'env_key': 'CODEX_KEY', 'wire_api': 'responses'}
-        for change, flags in [({}, ['--competition-api']),
-                              ({'base_url': 'https://invalid.example/v1'}, []),
+        for change, flags in [({'base_url': 'https://invalid.example/v1'}, []),
                               ({'env_key': 'OTHER_KEY'}, []),
                               ({'wire_api': 'chat_completions'}, [])]:
             with self.subTest(change=change, flags=flags), \
@@ -60,6 +59,24 @@ class LocalApiAuthorizationTests(unittest.TestCase):
         self.assertEqual(environment['LLM_MODEL'], 'gpt-5.6-luna')
         self.assertEqual(environment['LLM_API_MODE'], 'responses')
         self.assertNotIn('fake-gproxy-test-key', ' '.join(launch.call_args.args[0]))
+
+    def test_competition_api_reads_project_env_and_stdin_only_key(self):
+        dotenv = '# comment\nLLM_API_KEY=fake-dashscope-key\n'
+        with patch.object(sys, 'argv', ['run_local', '--output', 'unused-output', '--competition-api']), \
+                patch.object(Path, 'read_text', return_value=dotenv), \
+                patch.object(run_local.tomllib, 'loads') as loads, \
+                patch.object(Path, 'is_dir', return_value=True), \
+                patch.object(Path, 'mkdir'), \
+                patch.object(run_local.subprocess, 'run') as launch:
+            launch.return_value.returncode = 0
+            self.assertEqual(run_local.main(), 0)
+        loads.assert_not_called()
+        environment = json.loads(launch.call_args.kwargs['input'])
+        self.assertEqual(environment['LLM_BASE_URL'], 'https://dashscope.aliyuncs.com/compatible-mode/v1')
+        self.assertEqual(environment['LLM_API_KEY'], 'fake-dashscope-key')
+        self.assertEqual(environment['LLM_MODEL'], 'deepseek-v4-pro')
+        self.assertEqual(environment['LLM_API_MODE'], 'chat_completions')
+        self.assertNotIn('fake-dashscope-key', ' '.join(launch.call_args.args[0]))
 
 
 class CompetitionApiTests(unittest.TestCase):
