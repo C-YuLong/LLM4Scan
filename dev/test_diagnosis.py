@@ -220,11 +220,11 @@ class DiagnosisFilterTests(unittest.TestCase):
                         self.assertTrue((target / 'model_repair_R3.json').is_file())
                         publish.assert_not_called()
                     else:
-                        with self.assertRaisesRegex(ValueError, 'invalid or duplicate evidence'):
-                            repair_task.repair(source, target, time.monotonic(), time.monotonic()+120,
-                                               generate, lambda source: ([], []))
-                        self.assertEqual(runner.call_count, 2)
-                        publish.assert_not_called()
+                        # Invalid follow-up evidence is discarded (and saved);
+                        # the revised script still runs instead of failing the case.
+                        repair_task.repair(source, target, time.monotonic(), time.monotonic()+120,
+                                           generate, lambda source: ([], []))
+                        self.assertEqual(runner.call_count, 3)
                     self.assertEqual(len(calls), 2)
                     saved = json.loads((target / ('model_repair_R2_review1.json' if failure == 'diagnosis_only' else 'model_repair_R3.json')).read_text(encoding='utf-8'))
                     self.assertEqual(bool(saved['additional_diagnosis_validation']['rejected_diagnoses']

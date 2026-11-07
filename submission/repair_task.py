@@ -784,7 +784,12 @@ def repair(source, target, started, deadline, generate, design_outline):
             "issue_update_validation": {'validated': corrected, 'errors': update_errors}},
             ensure_ascii=False, indent=2), encoding="utf-8")
         if additional['rejected_diagnoses'] or corrected['rejected_diagnoses'] or update_errors:
-            raise ValueError('Original diagnosis addition or revision has invalid or duplicate evidence; see saved repair response')
+            # Rejected additions/revisions are discarded (and saved above); the
+            # revised script is still a measured repair candidate worth running.
+            rejected_issues = [item['issue'] for item in additional['rejected_diagnoses'] if 'issue' in item]
+            additional['issues'] = [issue for issue in additional['issues'] if issue not in rejected_issues]
+            if corrected['rejected_diagnoses'] or update_errors:
+                updates, indices, corrected = [], [], {**corrected, 'issues': []}
         if same_candidate and not updates and not additional['issues']:
             # The model explicitly returned no change after a measured failure.
             # Keep that response and failure; another identical Scan is not a repair.
