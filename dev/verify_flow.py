@@ -23,6 +23,8 @@ def verify(root, picorv32=False, cv32e40p=False, ethernet=False, tv80=False, ac9
                 name = path.relative_to(run).as_posix()
                 if name == f"deliverables/{final_id}.dofile":
                     name = "deliverables/final.dofile"
+                elif name == f'deliverables/pre_scan_{final_id}.v':
+                    name = 'deliverables/pre_scan_final.v'
                 expected_files[name] = path
     expected_files["final.log"] = run / f"{final_id}.log"
     final = root / "final_results"
@@ -78,7 +80,8 @@ def verify(root, picorv32=False, cv32e40p=False, ethernet=False, tv80=False, ac9
         checks["cell_clock_edge_mapping"] = bool(cells) and all(c[3:] == ("clk", "+", "sky130_fd_sc_hd__sdfxtp_1") for c in cells)
         checks["chain_lengths_match_cells"] = bool(chains) and {c[1]: int(c[2]) for c in chains} == dict(per_chain)
         checks["cell_indices_contiguous"] = all([c[1] for c in cells if c[0] == name] == list(range(count)) for name, count in per_chain.items())
-        checks["drc_zero"] = bool(re.search(r"Total violations:\s+0\b", (reports / "drc.rpt").read_text()))
+        drc_counts = [int(n) for text in report_texts for n in re.findall(r'Total violations:\s+(\d+)\b', text)]
+        checks["drc_zero"] = bool(drc_counts) and all(n == 0 for n in drc_counts)
         result.update({"chain_lengths": [int(c[2]) for c in chains], "scan_cells": len(cells), "scope": "Public T2/C1 report acceptance plus provenance; not functional equivalence"})
     if cv32e40p:
         required = ["deliverables/post_scan.v", "deliverables/post_scan.ctl", "deliverables/post_scan.def"]
@@ -260,6 +263,10 @@ def verify(root, picorv32=False, cv32e40p=False, ethernet=False, tv80=False, ac9
             checks["openc906_nine_pseudo_clock_domains"] = len(pseudo_outputs) == 9 and all(p.endswith('/clk_out') for p in pseudo_outputs)
             checks["openc906_chain_source_clocks"] = bool(chains) and all(c[6] in {"pll_core_cpuclk", "sys_apb_clk"} | pseudo_outputs for c in chains)
         else:
+            # Frozen public input: 799125 FFs, of which the task-excluded TAP
+            # contains 94. Report-to-report consistency alone once accepted a
+            # candidate that silently removed 783928 additional RAM FFs.
+            checks['veer_expected_ff_coverage'] = len(cells) == 799125 - 94
             checks["veer_jtag_tap_excluded"] = bool(cells) and not any('/i_jtag_tap/' in '/' + cell for cell in cells) and all('jtag_tck' not in c[6] for c in chains)
             checks["veer_scan_port_formats"] = bool(chains) and all(re.fullmatch(r"scan_data_in_\d+", c[3]) and re.fullmatch(r"scan_data_out_\d+", c[4]) for c in chains)
         result.update(chains=len(chains), unique_cells=len(cells), max_chain_length=max((int(c[2]) for c in chains), default=0), scope="Large public-case cell/CTL/SCANDEF and task-mode consistency; not functional equivalence")

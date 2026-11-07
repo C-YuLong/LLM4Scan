@@ -1,0 +1,23 @@
+# Offline qualification only: prove the buffered input against the frozen raw
+# gate netlist. No fixed inputs, blackboxes or clock assumptions.
+[gold]
+read_liberty -ignore_miss_func /tech/sky130.lib
+read_verilog /raw/design.v
+rename -hide */c:*
+prep -top serv_rf_top -flatten
+clk2fflogic
+opt_clean -purge
+check -assert
+
+[gate]
+read_liberty -ignore_miss_func /tech/sky130.lib
+read_verilog /candidate/design.v
+rename -hide */c:*
+prep -top serv_rf_top -flatten
+clk2fflogic
+opt_clean -purge
+check -assert
+
+[strategy sat]
+use sat
+depth 10

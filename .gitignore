@@ -9,6 +9,7 @@ venv/
 __pycache__/
 dev/results/
 official/
+benchmarks/
 *.zip
 *.tar
 *.tar.gz

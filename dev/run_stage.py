@@ -20,22 +20,42 @@ AUDITS.update({"task_1/case5": "openc906", "task_2/case5": "veer"})
 
 def _tokens(result_dir):
     total = {key: 0 for key in ("input_tokens", "output_tokens", "total_tokens")}
-    records = []
+    records, calls, cached, cache_complete = [], 0, 0, True
     paths = sorted(result_dir.glob("*.json"))
     if (result_dir / "verification.json").exists() and any(result_dir.glob("verification_R*.json")):
         paths = [path for path in paths if path.name != "verification.json"]
     for path in paths:
         value = json.loads(path.read_text(encoding="utf-8"))
-        usage = value.get("usage")
-        if not isinstance(usage, dict):
+        if path.name == 'decision_log.json' and value.get('failure_type') in {'HTTPError', 'TimeoutError'}:
+            records.append({'file': path.name, 'unknown_usage_reason': 'Failed or interrupted run may have requests without returned usage',
+                            'failure_type': value['failure_type'], 'http_status': value.get('http_status')})
+        attempts = value.get('diagnostic_attempts') or value.get('attempts')
+        if not attempts and 'usage' not in value:
             continue
-        missing = [key for key in total if not isinstance(usage.get(key), int)]
-        if missing:
-            records.append({"file": path.name, "missing": missing})
-            continue
-        for key in total:
-            total[key] += usage[key]
-    return {"totals": total, "incomplete": records} if records or any(total.values()) else None
+        # Per-attempt usage is authoritative: diagnostic/extraction roots hold
+        # aggregates, while verification roots hold only the last attempt.
+        for index, attempt in enumerate(attempts or [value], 1):
+            calls += 1
+            usage = attempt.get('usage') or {}
+            if usage.get('failed_http_statuses'):
+                records.append({'file': path.name, 'attempt': index, 'unknown_usage_reason': 'HTTP retries did not return provider usage',
+                                'http_statuses': usage['failed_http_statuses']})
+            missing = [key for key in total if not isinstance(usage.get(key), int)]
+            if missing:
+                records.append({"file": path.name, "attempt": index, "missing": missing})
+            else:
+                for key in total:
+                    total[key] += usage[key]
+            details = usage.get('input_tokens_details') or usage.get('prompt_tokens_details') or {}
+            hit = details.get('cached_tokens')
+            if not isinstance(hit, int):
+                cache_complete = False
+            else:
+                cached += hit
+    return {"totals": total, "incomplete": records, "calls": calls,
+            "scope": "Recorded response usage only; failed/interrupted requests may be unreported, not a billing statement",
+            "cached_input_tokens": cached if calls and cache_complete else None,
+            "uncached_input_tokens": total['input_tokens'] - cached if calls and cache_complete and not records else None} if calls or records else None
 
 
 def _runtime_acceptance(result_dir):
@@ -80,7 +100,7 @@ def _audit(root, result_dir, case):
                     return "/mnt/" + path.drive[0].lower() + path.as_posix()[2:]
                 source = root / "official/extracted/public_cases" / case / "input"
                 structural = subprocess.run([
-                    "wsl", "-d", "podman-machine-default", "-u", "user", "--", "podman", "run", "--rm",
+                    "wsl", "-d", "podman-machine-default", "-u", "user", "--", "podman", "run", "--rm", "--memory", "2g", "--cpus", "2",
                     "-v", f"{linux(root / 'dev')}:/devwork:rw", "-v", f"{linux(source)}:/input:ro",
                     "--entrypoint", "python3", "docker.io/library/scan-agent-base:ubuntu24",
                     "/devwork/verify_preprocessing.py", "--output", "/devwork/results/" + result_dir.name,

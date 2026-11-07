@@ -42,22 +42,31 @@ def publish_run(target, run_dir):
     final = target / "final_results"
     shutil.copytree(run_dir / "deliverables", final / "deliverables")
     (final / f"deliverables/{run_dir.name}.dofile").rename(final / "deliverables/final.dofile")
+    pre_scan = final / f'deliverables/pre_scan_{run_dir.name}.v'
+    if pre_scan.exists():
+        pre_scan.rename(final / 'deliverables/pre_scan_final.v')
     shutil.copytree(run_dir / "reports", final / "reports")
     shutil.copyfile(run_dir / f"{run_dir.name}.log", final / "final.log")
 
 
 def declared_artifacts(script):
-    """Artifact paths for the literal $out_*_dir/filename syntax we generate."""
+    """Literal paths, including the official examples' single-file `file join`."""
     paths = {
-        ("deliverables/" if variable == "out_res_dir" else "reports/") + filename
-        for variable, filename in re.findall(r'\$(out_res_dir|out_rpt_dir)/([^"\s}]+)', script)
+        ("deliverables/" if (braced or bare) == "out_res_dir" else "reports/") + filename
+        for braced, bare, filename in re.findall(
+            r'\$(?:\{(out_res_dir|out_rpt_dir)\}|(out_res_dir|out_rpt_dir))/([^"\s}]+)', script)
     }
+    paths.update(
+        ("deliverables/" if (braced or bare) == "out_res_dir" else "reports/") + filename
+        for braced, bare, filename in re.findall(
+            r'\[file\s+join\s+\$(?:\{(out_res_dir|out_rpt_dir)\}|(out_res_dir|out_rpt_dir))\s+([^\s${}\[\]";]+)\s*\]', script)
+    )
     if not paths:
         raise ValueError("No literal artifact paths declared by the supported dofile flow")
     return sorted(paths)
 
 
-def run_scan(dofile, run_dir, timeout):
+def run_scan(dofile, run_dir, timeout, *, netlist_edits=(), source=None):
     run_dir = Path(run_dir).resolve()
     deliverables = run_dir / "deliverables"
     reports = run_dir / "reports"
@@ -70,26 +79,42 @@ def run_scan(dofile, run_dir, timeout):
     status = "error"
     code = None
     failure = None
+    lec = None
+    if netlist_edits:
+        from netlist_repair import prove
+        lec = prove(source, run_dir, netlist_edits, dofile, started + timeout)
+        proven_bytes = (run_dir / lec['candidate']).read_bytes()
     with log.open("wb") as stream:
         process = None
         try:
+            if lec is not None and not lec['passed']:
+                stream.write(b'[AGENT] EQY did not prove equivalence; Scan was not launched.\n')
+                raise ValueError('EQY did not prove equivalence')
             process = subprocess.Popen(
                 ["dftexp_scan", "-f", str(script)],
                 cwd=run_dir, stdout=stream, stderr=subprocess.STDOUT,
                 stdin=subprocess.DEVNULL,
                 start_new_session=True,
             )
-            code = process.wait(timeout=timeout)
+            code = process.wait(timeout=max(0.001, started + timeout - time.monotonic()))
         except (subprocess.TimeoutExpired, TimeoutError) as exc:
             status = "aborted"
             failure = exc
         except OSError as exc:
+            failure = exc
+        except ValueError as exc:
+            if lec is None or lec['passed']:
+                raise
             failure = exc
         finally:
             if process is not None and process.poll() is None:
                 os.killpg(process.pid, signal.SIGKILL)
                 code = process.wait()
     text = log.read_text(encoding="utf-8", errors="replace")
+    if lec is not None:
+        lec['candidate_unchanged_after_scan'] = (run_dir / lec['candidate']).read_bytes() == proven_bytes
+        lec['passed'] = lec['passed'] and lec['candidate_unchanged_after_scan']
+        (run_dir / 'lec_result.json').write_text(json.dumps(lec, indent=2), encoding='utf-8')
     errors = [line for line in text.splitlines() if re.search(r"\[ERROR\]|^Error:", line)]
     if status != "aborted" and code == 0 and not errors:
         status = "completed"
@@ -100,10 +125,33 @@ def run_scan(dofile, run_dir, timeout):
         "elapsed_seconds": round(time.monotonic() - started, 3),
         "errors": errors,
         "failure_type": type(failure).__name__ if failure else None,
-        "artifacts": [str(p.relative_to(run_dir)) for p in run_dir.rglob("*") if p.is_file()],
+        "scan_invoked": process is not None,
     }
+    if source is not None:
+        from control_context import constant_output_check, mapping_input_losses
+        result['cell_mapping_input_losses'] = mapping_input_losses(
+            Path(source), text, candidate=run_dir / lec['candidate'] if lec is not None else None)
+        # Wrapper outputs legitimately become test-mode controllable. This
+        # narrow constant check applies only without actual dedicated wrapper
+        # bits; it is not a functional-mode wrapper proof.
+        wrapped = any(re.search(r'Wrapper Chain Cell Bit Count\s+[1-9]\d*', path.read_text(encoding='utf-8', errors='replace'))
+                      for path in reports.glob('*.rpt'))
+        if code == 0 and not errors and not wrapped:
+            outputs = [run_dir / name for name in declared_artifacts(dofile)
+                       if name.endswith('.v') and (run_dir / name).is_file()
+                       and (lec is None or name != lec['candidate'])]
+            try:
+                result['constant_output_integrity'] = constant_output_check(
+                    Path(source), dofile, outputs, started + timeout,
+                    candidate=run_dir / lec['candidate'] if lec is not None else None)
+            except (subprocess.TimeoutExpired, TimeoutError) as exc:
+                failure = exc
+                result.update(exit_status='aborted', failure_type=type(exc).__name__,
+                    constant_output_integrity={'checked': False, 'reason': 'Current run deadline expired during constant-output checking'})
+    result['artifacts'] = [str(p.relative_to(run_dir)) for p in run_dir.rglob('*') if p.is_file()]
+    result['elapsed_seconds'] = round(time.monotonic() - started, 3)
     (run_dir / "execution.json").write_text(json.dumps(result, indent=2), encoding="utf-8")
-    if failure is not None and not isinstance(failure, subprocess.TimeoutExpired):
+    if failure is not None and not isinstance(failure, (subprocess.TimeoutExpired, ValueError)):
         raise failure
     return result
 

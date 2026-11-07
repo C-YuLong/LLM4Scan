@@ -9,6 +9,23 @@ import re
 from verify_flow import verify
 
 
+def scandef_members_match(scandef, expected):
+    """Compare physical scan bits across legitimate lockup-split DEF records."""
+    actual, seen = {}, set()
+    for name, body in re.findall(r"(?ms)^\s*-\s+SubScanChain_(\S+)\s+(.*?);", scandef):
+        chain = name if name in expected else re.sub(r"_SUB\d+$", "", name)
+        if chain not in expected or name in seen:
+            return False
+        seen.add(name)
+        members = actual.setdefault(chain, Counter())
+        for cell, bits in re.findall(r"(?m)^\s+(\S+)\s+\(\s*IN\s+[^\n]*?\(\s*BITS\s+(\d+)\s*\)", body):
+            # DEF escapes bus brackets; zero-bit muxes are physical routing
+            # objects, not the FFs listed as ScanCells in CTL.
+            if int(bits):
+                members[re.sub(r"\\(.)", r"\1", cell)] += int(bits)
+    return actual == expected
+
+
 def audit(root, case):
     result = verify(root)
     checks = result["checks"]
@@ -50,13 +67,14 @@ def audit(root, case):
         checks["flat_ctl_includes_all_blackbox_cells"] = bool(expected_cells) and expected_cells <= set(ctl_cells) and len(re.findall(r"\bScanStructures\b", ctl)) == 1
         # CTL-only chains have no top-level physical cells to export to DEF.
         # Compare with chains containing real top-level cells, not total chains.
-        physical_chains = set()
+        physical_chains = {}
         for name, body in ctl_blocks:
             match = re.search(r"ScanCells\s+(.*?);", body, re.S)
             cells = re.findall(r'"([^"]+)"', match[1]) if match else []
-            if any(cell not in expected_cells for cell in cells):
-                physical_chains.add(name)
-        checks["scandef_physical_chains"] = set(def_names) == physical_chains
+            physical = Counter(cell for cell in cells if cell not in expected_cells)
+            if physical:
+                physical_chains[name] = physical
+        checks["scandef_physical_chains"] = scandef_members_match(scandef, physical_chains)
         prefix = "x_cr_tcipif_top/x_cr_clic_top/x_cr_clic_ctrl/"
         scoped = [cell for cell in ctl_cells if cell.startswith(prefix)]
         checks["hierarchy_exclusion_with_mintthresh_exception"] = bool(scoped) and all(cell.startswith(prefix + "mintthresh") for cell in scoped)

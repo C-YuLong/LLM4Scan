@@ -1,0 +1,12 @@
+# Pinned SERV f200eb2ed7b69ac1c6b8eddd47654522aeee5ce8, ISC.
+# Explicit RTL only; no downloaded build scripts are executed.
+read_verilog /sources/serv-f200eb2ed7b69ac1c6b8eddd47654522aeee5ce8/rtl/serv_bufreg.v /sources/serv-f200eb2ed7b69ac1c6b8eddd47654522aeee5ce8/rtl/serv_bufreg2.v /sources/serv-f200eb2ed7b69ac1c6b8eddd47654522aeee5ce8/rtl/serv_alu.v /sources/serv-f200eb2ed7b69ac1c6b8eddd47654522aeee5ce8/rtl/serv_csr.v /sources/serv-f200eb2ed7b69ac1c6b8eddd47654522aeee5ce8/rtl/serv_ctrl.v /sources/serv-f200eb2ed7b69ac1c6b8eddd47654522aeee5ce8/rtl/serv_decode.v /sources/serv-f200eb2ed7b69ac1c6b8eddd47654522aeee5ce8/rtl/serv_immdec.v /sources/serv-f200eb2ed7b69ac1c6b8eddd47654522aeee5ce8/rtl/serv_mem_if.v /sources/serv-f200eb2ed7b69ac1c6b8eddd47654522aeee5ce8/rtl/serv_rf_if.v /sources/serv-f200eb2ed7b69ac1c6b8eddd47654522aeee5ce8/rtl/serv_rf_ram_if.v /sources/serv-f200eb2ed7b69ac1c6b8eddd47654522aeee5ce8/rtl/serv_rf_ram.v /sources/serv-f200eb2ed7b69ac1c6b8eddd47654522aeee5ce8/rtl/serv_state.v /sources/serv-f200eb2ed7b69ac1c6b8eddd47654522aeee5ce8/rtl/serv_debug.v /sources/serv-f200eb2ed7b69ac1c6b8eddd47654522aeee5ce8/rtl/serv_top.v /sources/serv-f200eb2ed7b69ac1c6b8eddd47654522aeee5ce8/rtl/serv_rf_top.v /sources/serv-f200eb2ed7b69ac1c6b8eddd47654522aeee5ce8/rtl/serv_aligner.v /sources/serv-f200eb2ed7b69ac1c6b8eddd47654522aeee5ce8/rtl/serv_compdec.v
+synth -top serv_rf_top -flatten
+dfflibmap -liberty /tech/sky130.lib
+abc -liberty /tech/sky130.lib
+clean
+read_liberty -lib -ignore_miss_func /tech/sky130.lib
+check -assert
+stat -liberty /tech/sky130.lib
+write_verilog -noattr -noexpr -simple-lhs /work/design.v
+write_json /work/design.json

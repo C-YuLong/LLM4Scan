@@ -1,0 +1,11 @@
+# Isolated input-preparation experiment for the demonstrated Scan assign issue.
+# This does NOT authorize changing a competition Task 1 netlist at runtime.
+read_liberty -lib /tech/sky130.lib
+read_verilog /raw/design.v
+hierarchy -check -top serv_rf_top
+insbuf -buf sky130_fd_sc_hd__buf_1 A X serv_rf_top
+# Remove buffers feeding only unused aliases; do not tie undriven nets.
+clean
+check -assert
+write_verilog -noattr -noexpr -nohex -simple-lhs /work/design.v
+write_json /work/design.json

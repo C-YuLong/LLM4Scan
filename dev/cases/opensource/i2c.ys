@@ -1,0 +1,18 @@
+# Pinned Alex Forencich verilog-i2c a65be4045e898a52e791c6ee71f8f79a7cd2e129, MIT.
+# Only explicit RTL; three FIFO depths are fixed before any model run.
+read_verilog /sources/verilog-i2c-a65be4045e898a52e791c6ee71f8f79a7cd2e129/rtl/axis_fifo.v /sources/verilog-i2c-a65be4045e898a52e791c6ee71f8f79a7cd2e129/rtl/i2c_master.v /sources/verilog-i2c-a65be4045e898a52e791c6ee71f8f79a7cd2e129/rtl/i2c_master_wbs_16.v
+chparam -set CMD_FIFO_DEPTH 8 -set WRITE_FIFO_DEPTH 8 -set READ_FIFO_DEPTH 8 i2c_master_wbs_16
+synth -top i2c_master_wbs_16 -flatten
+dfflibmap -liberty /tech/sky130.lib
+abc -liberty /tech/sky130.lib
+clean
+read_liberty -lib -ignore_miss_func /tech/sky130.lib
+check -assert
+# Express aliases through ordinary library buffers before freezing the input.
+# This is fixture synthesis, not a runtime Task 1 input rewrite.
+insbuf -buf sky130_fd_sc_hd__buf_1 A X i2c_master_wbs_16
+clean
+check -assert
+stat -liberty /tech/sky130.lib
+write_verilog -noattr -noexpr -nohex -simple-lhs /work/design.v
+write_json /work/design.json

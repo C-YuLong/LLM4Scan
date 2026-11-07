@@ -1,0 +1,11 @@
+# Fixed Secworks SHA-256 RTL; fixture synthesis only, no upstream build scripts.
+read_verilog /sources/sha256-837c5cc396f001d18f2c765721c585716eb439ae/src/rtl/sha256_core.v /sources/sha256-837c5cc396f001d18f2c765721c585716eb439ae/src/rtl/sha256_w_mem.v /sources/sha256-837c5cc396f001d18f2c765721c585716eb439ae/src/rtl/sha256_k_constants.v
+synth -top sha256_core -flatten
+dfflibmap -liberty /tech/sky130.lib
+abc -liberty /tech/sky130.lib
+clean
+read_liberty -lib /tech/sky130.lib
+check -assert
+stat -liberty /tech/sky130.lib
+write_verilog -noattr -noexpr -simple-lhs /work/design.v
+write_json /work/design.json

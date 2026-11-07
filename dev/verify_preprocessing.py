@@ -7,10 +7,10 @@ import re
 import subprocess
 
 
-def read_design(path, library, destination):
-    script = f'read_liberty -lib {library}; read_verilog {path}; hierarchy -top openE902; flatten; write_json {destination}'
+def read_design(path, library, destination, top='openE902'):
+    script = f'read_liberty -lib {library}; read_verilog {path}; hierarchy -top {top}; flatten; write_json {destination}'
     subprocess.run(["yosys", "-Q", "-T", "-p", script], check=True, stdout=subprocess.DEVNULL)
-    return json.loads(destination.read_text())["modules"]["openE902"]
+    return json.loads(destination.read_text())["modules"][top]
 
 
 def verify(original, final):

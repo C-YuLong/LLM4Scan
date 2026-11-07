@@ -1,0 +1,33 @@
+set script_dir /input
+set base_dir /output
+set out_rpt_dir /output/reports
+set out_res_dir /output/deliverables
+load_lib "$script_dir/lib/sky130.lib"
+load_netlist "$script_dir/netlist/bridge.v"
+present_design bridge
+set_scan_cell_mapping sky130_fd_sc_hd__dfxtp_1 sky130_fd_sc_hd__sdfxtp_1
+set_scan_signal -type clock -port tick_a -off_state 0
+set_scan_signal -type clock -port tick_wrong -off_state 0
+set_scan_cfg -mix_clocks false -mix_edges false
+add_scan_partition ingress -clocks {tick_a}
+set_current_scan_partition ingress
+set_scan_cfg -chain_count 1 -max_length 4
+set_scan_signal -type scan_enable -port shift_a -off_state 0 -usage scan
+set_current_scan_partition Default_Partition
+add_scan_partition egress -clocks {tick_b}
+set_current_scan_partition egress
+set_scan_cfg -chain_count 1 -max_length 4
+set_scan_signal -type scan_enable -port shift_b -off_state 0 -usage scan
+set_current_scan_partition Default_Partition
+examine_scan_drc -file "$out_rpt_dir/drc.rpt"
+examine_scan_chain
+insert_dft_logic
+rpt_scan_chain -file "$out_rpt_dir/scan_chain.rpt"
+rpt_scan_chain_cell -file "$out_rpt_dir/scan_cell.rpt"
+rpt_scan_cfg -file "$out_rpt_dir/scan_cfg.rpt"
+rpt_scan_signal -file "$out_rpt_dir/scan_signal.rpt"
+rpt_scan_partition -file "$out_rpt_dir/scan_partition.rpt"
+rpt_insertion_info -file "$out_rpt_dir/insertion_info.rpt"
+dump_netlist -file "$out_res_dir/post_scan.v"
+dump_ctl "$out_res_dir/post_scan.ctl"
+exit

@@ -1,0 +1,9 @@
+# Synthesize the pinned public RTL; this is fixture preparation, not model output.
+read_verilog /sources/aes/src/rtl/aes_core.v /sources/aes/src/rtl/aes_encipher_block.v /sources/aes/src/rtl/aes_decipher_block.v /sources/aes/src/rtl/aes_key_mem.v /sources/aes/src/rtl/aes_sbox.v /sources/aes/src/rtl/aes_inv_sbox.v
+synth -top aes_core -flatten
+dfflibmap -liberty /tech/sky130.lib
+abc -liberty /tech/sky130.lib
+clean
+stat -liberty /tech/sky130.lib
+write_verilog -noattr -noexpr -simple-lhs /work/design.v
+write_json /work/design.json

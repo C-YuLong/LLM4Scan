@@ -1,0 +1,9 @@
+# Synthesize the pinned public RTL; this is fixture preparation, not model output.
+read_verilog /sources/verilog-uart/rtl/uart.v /sources/verilog-uart/rtl/uart_rx.v /sources/verilog-uart/rtl/uart_tx.v
+synth -top uart -flatten
+dfflibmap -liberty /tech/sky130.lib
+abc -liberty /tech/sky130.lib
+clean
+stat -liberty /tech/sky130.lib
+write_verilog -noattr -noexpr -simple-lhs /work/design.v
+write_json /work/design.json

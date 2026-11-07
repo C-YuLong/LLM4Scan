@@ -14,12 +14,46 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "submission"))
 import scan_agent
 import scan_runner
 import repair_task
-from acceptance import inspect_run
+from acceptance import inspect_run, _task_requirements
 import time
 
 
 @unittest.skipUnless(os.name == "posix", "Submission runs inside the Linux image")
 class ExecutionTests(unittest.TestCase):
+    def test_requirement_quote_correction_does_not_rerun_or_change_scan(self):
+        line = 'if {[llength $indices] >= 10} {'
+        body = line + '\n    puts ready\n}\nexit'
+        plan = {'dofile': body, 'requirements': [{'requirement': 'At least ten indices',
+                                                'command': 'if {[llength $indices] >= 10]'}]}
+        for corrected in (line, ''):
+            with self.subTest(corrected=corrected), tempfile.TemporaryDirectory() as folder:
+                source, target = Path(folder) / 'input', Path(folder) / 'output'
+                source.mkdir()
+                (source / 'task_spec.md').write_text('仅做预处理，不构建扫描链。', encoding='utf-8')
+                (source / 'limitations.md').write_text('不超过 150 秒', encoding='utf-8')
+                def run(script, run_dir, timeout, **kwargs):
+                    (run_dir / 'deliverables').mkdir(parents=True)
+                    (run_dir / 'reports').mkdir()
+                    (run_dir / 'deliverables/R1.dofile').write_text(script, encoding='utf-8')
+                    (run_dir / 'R1.log').write_text('Completed', encoding='utf-8')
+                    return {'exit_status': 'completed', 'errors': [], 'tool_call_id': 'R1'}
+                with patch.object(sys, 'argv', ['agent_system', '-input', str(source), '-output', str(target)]), \
+                        patch.object(scan_agent, 'generate', side_effect=[(plan, {}), ({'commands': [corrected]}, {})]) as model, \
+                        patch.object(scan_agent, 'run_scan', side_effect=run) as runner, \
+                        patch.object(scan_agent, 'design_outline', return_value=([], [])), \
+                        patch.object(scan_agent, 'inspect_run', return_value=({'accepted': True, 'missing_outputs': [], 'checks': {}}, {}, [])):
+                    self.assertEqual(scan_agent.main(), 0 if corrected else 1)
+                self.assertEqual(runner.call_count, 1)
+                self.assertEqual(model.call_count, 2)
+                self.assertTrue((target / 'model_requirement_mapping.json').is_file())
+                if corrected:
+                    final = (target / 'final_results/deliverables/final.dofile').read_text(encoding='utf-8')
+                    self.assertEqual(final, runner.call_args.args[0])
+                    decision = json.loads((target / 'decision_log.json').read_text(encoding='utf-8'))
+                    self.assertEqual(decision['requirement_mapping'][0]['dft_config'], line)
+                else:
+                    self.assertFalse((target / 'final_results').exists())
+
     def test_task1_semantic_failure_retries_completed_tool_run(self):
         with tempfile.TemporaryDirectory() as folder:
             source = Path(folder) / "input"
@@ -35,7 +69,7 @@ class ExecutionTests(unittest.TestCase):
             plan = {"dofile": body, "requirements": [{"requirement": "DRC then insertion",
                      "command": 'examine_scan_drc -file "$out_rpt_dir/drc.rpt"\ninsert_dft_logic'}]}
 
-            def run(script, run_dir, timeout):
+            def run(script, run_dir, timeout, **kwargs):
                 (run_dir / "reports").mkdir(parents=True)
                 (run_dir / "deliverables").mkdir()
                 (run_dir / "deliverables" / f"{run_dir.name}.dofile").write_text(script)
@@ -49,9 +83,16 @@ class ExecutionTests(unittest.TestCase):
 
             with patch.object(sys, "argv", ["agent_system", "-input", str(source), "-output", str(target)]), \
                     patch.object(scan_agent, "generate", return_value=(plan, {})) as model, \
+                    patch.object(scan_agent, "extract_task_constraints", return_value=(
+                        _task_requirements((source / 'task_spec.md').read_text(encoding='utf-8')), [])), \
                     patch.object(scan_agent, "run_scan", side_effect=run):
                 self.assertEqual(scan_agent.main(), 0)
             self.assertEqual(model.call_count, 2)
+            first, correction = model.call_args_list
+            self.assertTrue(correction.args[0].startswith(first.args[0][:-1]))
+            self.assertNotIn('tool_guide', json.loads(first.args[0]))
+            self.assertTrue(first.kwargs['tool_guide'])
+            self.assertEqual(first.kwargs['tool_guide'], correction.kwargs['tool_guide'])
             feedback = json.loads(model.call_args.args[0])["previous_run"]
             self.assertFalse(feedback["acceptance"]["accepted"])
             self.assertEqual(feedback["errors"], [])
@@ -70,8 +111,9 @@ class ExecutionTests(unittest.TestCase):
             spec = (public / f"case{case}/input/task_spec.md").read_text(encoding="utf-8")
             self.assertEqual(bool(scan_agent.task1_full_insertion(spec)), case not in (1, 4))
         _, instances = scan_agent.design_outline(public / "case1/input")
-        self.assertIn({"path": "x_cr_core_top/x_cr_sys_io_pll", "type": "cr_sys_io_pll"}, instances)
-        self.assertNotIn({"path": "x_cr_sys_io_pll", "type": "cr_sys_io_pll"}, instances)
+        identities = {(item["path"], item["type"]) for item in instances}
+        self.assertIn(("x_cr_core_top/x_cr_sys_io_pll", "cr_sys_io_pll"), identities)
+        self.assertNotIn(("x_cr_sys_io_pll", "cr_sys_io_pll"), identities)
 
     def test_shared_paths_and_preprocessing_acceptance(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -111,6 +153,8 @@ class ExecutionTests(unittest.TestCase):
     def test_drc_failure_is_independent_of_model_approval(self):
         with tempfile.TemporaryDirectory() as folder:
             target = Path(folder)
+            (target / "runs/R1").mkdir(parents=True)
+            (target / "runs/R1/R1.log").write_text("Original execution evidence", encoding="utf-8")
             run = target / "runs/R2"
             (run / "reports").mkdir(parents=True)
             (run / "deliverables").mkdir()
@@ -120,7 +164,7 @@ class ExecutionTests(unittest.TestCase):
             issue = {"phenomenon": "test", "located_object": "test", "root_cause": "test",
                      "violated_requirement": "DRC zero", "original_command": "original", "fix_action": "test"}
             approval = {"all_requirements_met": True, "summary": "model approves",
-                        "issues": [{"resolved": True, "original_defect_supported": True, "source": "R2.log", "line_start": 1, "line_end": 3}]}
+                        "issues": {'I1': {"issue_number": 1, "resolved": True, "original_defect_supported": True, "evidence_id": "E1"}}}
             with patch.object(scan_agent, "generate", return_value=(approval, {})):
                 _, _, _, feedback = repair_task.verify_round(
                     target, run, 'examine_scan_drc -file "$out_rpt_dir/drc.rpt"',
@@ -159,6 +203,24 @@ class ExecutionTests(unittest.TestCase):
                 self.assertEqual(result["exit_status"], "aborted")
                 self.assertIsNotNone(children[0].poll())
 
+        for failure in (subprocess.TimeoutExpired('yosys', 0.1), TimeoutError('test deadline')):
+            with self.subTest(check_failure=type(failure).__name__), tempfile.TemporaryDirectory() as folder:
+                source, run = Path(folder), Path(folder) / 'R1'
+                def finish_scan(*args, **kwargs):
+                    (run / 'deliverables/post.v').write_text('module top; endmodule\n')
+                    return real_popen([sys.executable, '-c', 'pass'], **kwargs)
+                with patch.object(scan_runner.subprocess, 'Popen', side_effect=finish_scan), \
+                     patch('control_context.constant_output_check', side_effect=failure):
+                    if isinstance(failure, TimeoutError):
+                        with self.assertRaises(TimeoutError):
+                            scan_runner.run_scan('dump_netlist -file "$out_res_dir/post.v"', run, 20, source=source)
+                    else:
+                        scan_runner.run_scan('dump_netlist -file "$out_res_dir/post.v"', run, 20, source=source)
+                result = json.loads((run / 'execution.json').read_text())
+                self.assertEqual(result['exit_status'], 'aborted')
+                self.assertFalse(result['constant_output_integrity']['checked'])
+                self.assertEqual(result['failure_type'], type(failure).__name__)
+
     def test_missing_scan_binary_is_recorded(self):
         with tempfile.TemporaryDirectory() as folder:
             with patch.object(scan_runner.subprocess, "Popen", side_effect=FileNotFoundError):
@@ -175,6 +237,9 @@ class ExecutionTests(unittest.TestCase):
             (source / "task_spec.md").write_text("Failure handling test", encoding="utf-8")
             (source / "limitations.md").write_text("不超过 150 秒", encoding="utf-8")
             target = Path(folder) / "output"
+            target.mkdir()
+            (target / '.dockerenv').write_text('platform metadata')
+            (target / 'container.log').write_text('platform stdout stream')
             with patch.object(sys, "argv", ["agent_system", "-input", str(source), "-output", str(target)]):
                 with patch.object(scan_agent, "generate", side_effect=RuntimeError("secret-marker")):
                     self.assertEqual(scan_agent.main(), 1)
@@ -183,6 +248,8 @@ class ExecutionTests(unittest.TestCase):
                 self.assertIsNone(decision["final_run"])
                 self.assertEqual(decision["failure_type"], "RuntimeError")
                 self.assertNotIn(b"secret-marker", saved)
+                self.assertEqual((target / '.dockerenv').read_text(), 'platform metadata')
+                self.assertEqual((target / 'container.log').read_text(), 'platform stdout stream')
                 with self.assertRaises(ValueError):
                     scan_agent.main()
                 self.assertEqual(saved, (target / "decision_log.json").read_bytes())

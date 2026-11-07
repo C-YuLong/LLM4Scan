@@ -2,4 +2,6 @@
 !Dockerfile
 !submission/
 !submission/**
+!knowledge/
+!knowledge/**
 submission/__pycache__/

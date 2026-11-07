@@ -12,14 +12,26 @@ import urllib.request
 from urllib.error import HTTPError
 
 from scan_runner import run_scan, generated_script, record_change, publish_run, resolve_selectors
-from acceptance import inspect_run
-from model_contract import TASK1
+from acceptance import inspect_run, extract_task_constraints
+from model_contract import TASK1, ModelResponseError, record, STRING
+from control_context import component_sources
+from knowledge_search import retrieve
+
+
+def check_output(target):
+    # The platform opens container.log before launching the agent. Leave that
+    # stream and hidden metadata untouched; refuse existing agent artifacts.
+    if target.exists() and any(
+        not item.name.startswith('.')
+        and not (item.name == 'container.log' and item.is_file())
+        for item in target.iterdir()
+    ):
+        raise ValueError("Output directory contains visible files; previous runs are preserved")
 
 
 def prepare_output(target):
     target.mkdir(parents=True, exist_ok=True)
-    if any(target.iterdir()):
-        raise ValueError("Output directory must be empty; previous runs are preserved")
+    check_output(target)
     # Persist a truthful decision before the first network/tool operation.
     (target / "decision_log.json").write_text(json.dumps({
         "case_id": os.environ.get("CASE_ID", ""), "final_run": None,
@@ -35,12 +47,15 @@ def main():
     args = parser.parse_args()
     target = Path(args.output).resolve()
     # Check before entering the failure handler: never rewrite an old run.
-    if target.exists() and any(target.iterdir()):
-        raise ValueError("Output directory must be empty; previous runs are preserved")
+    check_output(target)
     try:
         return execute(args)
     except Exception as exc:
         signal.setitimer(signal.ITIMER_REAL, 0)
+        if isinstance(exc, ModelResponseError):
+            (target / 'model_response_failure.json').write_text(json.dumps({
+                'validation_error': str(exc), 'plan': exc.plan, 'usage': exc.usage,
+            }, ensure_ascii=False, indent=2), encoding='utf-8')
         decision_path = target / "decision_log.json"
         if decision_path.exists():
             decision = json.loads(decision_path.read_text(encoding="utf-8"))
@@ -180,7 +195,7 @@ def design_outline(source):
             for name, header in modules if name in used_types], resolved
 
 
-def generate(prompt, timeout, instructions=None, output_schema=TASK1):
+def generate(prompt, timeout, instructions=None, output_schema=TASK1, *, tool_guide=""):
     payload = {
         "model": os.environ["LLM_MODEL"],
         "instructions": instructions or (
@@ -188,6 +203,11 @@ def generate(prompt, timeout, instructions=None, output_schema=TASK1):
             "requirements (array of {requirement, command}). Every requirement must map to an "
             "exact command substring of dofile. Use supplied tool documentation. Never fabricate "
             "logs, reports, or netlists. Do not modify input files. Do not execute shell commands. "
+            "task_contract contains frozen task-derived constraints, not a reference solution. "
+            "Honor its allowed_ignores list: an empty list forbids EVERY DRC Ignore/Warning override, "
+            "including tie rules shown only as conditional examples in the guide. Allowed residual "
+            "violations are NOT permission to suppress a rule. Keep the original task as authority "
+            "for requirements not covered by the contract. "
             "Use $input_dir, $out_res_dir, $out_rpt_dir which are defined by the runner. "
             "Export with literal paths like $out_res_dir/file.v or $out_rpt_dir/file.rpt. "
             "Only generate the task's requested stages; preprocessing tasks must not build chains. "
@@ -198,6 +218,10 @@ def generate(prompt, timeout, instructions=None, output_schema=TASK1):
             "Instance connections map PIN NAME keys to PARENT NET NAME values: append the KEY "
             "to an instance selector, never the connected net value. For .Q(net42), the pin "
             "is [[H12]]/Q, not [[H12]]/net42. Declare pseudo inputs BEFORE defining their clock signals. "
+            "When pseudo inputs are required, also export rpt_pseudo_pi so their actual "
+            "created objects can be checked; a missing report is not proof the pin selector is wrong. "
+            "When using set_scan_element, export rpt_scan_element -type all. Only task-frozen "
+            "scan_membership exclusions may remove FFs; do not exclude RAM FFs to hide blocked gates. "
             "A leaf name mentioned by the task is not necessarily a top-level instance. Never silently ignore "
             "a Nothing matched warning for a required object selector. "
             "For full_insertion=true, run exactly one examine_scan_drc, examine_scan_chain, "
@@ -207,8 +231,23 @@ def generate(prompt, timeout, instructions=None, output_schema=TASK1):
             "Export DRC, scan_chain, scan_cfg, scan_signal, "
             "scan_chain_cell and insertion_info reports for acceptance, plus all requested outputs. "
             "End with exit. Do not define or change the runner's path variables."
-            " When previous_run is provided, also return repair with located_object, root_cause "
-            "and action strings explaining the correction. Recheck the original task's distinct "
+            " Always include repair as an object with located_object, root_cause and action strings; "
+            "use empty strings on the initial plan, not null. When previous_run is provided, "
+            "explain the correction in repair. Preserve already satisfied requirements while "
+            "fixing failed ones; a combined partition-check failure is NOT evidence that every "
+            "partition property is wrong. Read its per-partition expected/observed details. "
+            "add_scan_partition changes the current partition. Set global port formats and "
+            "ICG controls before creating partitions, or explicitly switch back to "
+            "Default_Partition; those settings are not supported in custom partitions. "
+            "If supplied ICG instances have tied-off test controls, configure a global "
+            "scan_enable with usage clock_gating or all before DRC. Local partition enables "
+            "with usage scan do not drive ICG controls; automatic port creation does not "
+            "establish their controllability during DRC. Keep the local FF enable bindings too. "
+            "An ordinary Liberty ICG with that test control does not also need an "
+            "associated_internal_clocks declaration, including when wrapped in a module. "
+            "Do not add one without a demonstrated clock-trace need: it can create extra "
+            "chain groups even with internal_clocks none. "
+            "Recheck the original task's distinct "
             "object scopes: ICG exclusions and non-scannable FF hierarchies are separate requirements."
         ),
         "input": prompt,
@@ -217,8 +256,34 @@ def generate(prompt, timeout, instructions=None, output_schema=TASK1):
         "store": False,
         "text": {"format": {"type": "json_schema", "name": "scan_response", "strict": True, "schema": output_schema}},
     }
+    if tool_guide:
+        # Keep the shared reference before phase-specific instructions, schemas
+        # and task data. Do not repeat it in the user payload as well.
+        payload['instructions'] = (
+            'Tool reference for syntax; it does not override the actual task requirements.\n'
+            + tool_guide + '\n\nCurrent task instructions:\n' + payload['instructions'])
+    protocol = os.environ.get('LLM_API_MODE', 'chat_completions')
+    if protocol == 'chat_completions':
+        payload = {'model': payload['model'], 'messages': [
+            {'role': 'system', 'content': payload['instructions'] + '\nReturn only a JSON object conforming to this schema:\n' + json.dumps(output_schema, separators=(',', ':'))},
+            {'role': 'user', 'content': prompt}]}
+        # DashScope's fixed competition model maps low effort to high. Its
+        # documented non-thinking mode leaves time for Scan and verification
+        # on short cases; do not substitute another model or relax acceptance.
+        if payload['model'] == 'deepseek-v4-pro':
+            # This model supports JSON Object, not the stricter JSON Schema API.
+            payload['response_format'] = {'type': 'json_object'}
+            if timeout <= 180:
+                payload['enable_thinking'] = False
+    elif protocol == 'responses':
+        # Keep the routing hint stable across calls/processes. The gproxy/Luna
+        # repeat probe hit cached tokens with this explicit key, unlike the
+        # otherwise identical requests that relied on its default routing.
+        payload['prompt_cache_key'] = 'scanscan-scan-agent-v1'
+    else:
+        raise ValueError('LLM_API_MODE must be chat_completions or responses')
     request = urllib.request.Request(
-        os.environ["LLM_BASE_URL"].rstrip("/") + "/responses",
+        os.environ["LLM_BASE_URL"].rstrip("/") + ('/chat/completions' if protocol == 'chat_completions' else '/responses'),
         data=json.dumps(payload).encode(),
         headers={"Authorization": "Bearer " + os.environ["LLM_API_KEY"], "Content-Type": "application/json"},
     )
@@ -228,6 +293,9 @@ def generate(prompt, timeout, instructions=None, output_schema=TASK1):
     for attempt in range(2):
         try:
             with urllib.request.urlopen(request, timeout=max(0.001, request_deadline - time.monotonic())) as response:
+                if protocol == 'chat_completions':
+                    completed = json.load(response)
+                    break
                 for line in response:
                     if not line.startswith(b"data: ") or line.strip() == b"data: [DONE]":
                         continue
@@ -243,11 +311,50 @@ def generate(prompt, timeout, instructions=None, output_schema=TASK1):
             failed_http.append(exc.code)
     if completed is None:
         raise RuntimeError("Missing response.completed")
+    if protocol == 'chat_completions':
+        choice = completed['choices'][0]
+        usage = completed.get('usage')
+        if usage is not None:
+            usage = {**usage, 'input_tokens': usage.get('prompt_tokens'), 'output_tokens': usage.get('completion_tokens'),
+                     'model': completed.get('model')}
+            if 'enable_thinking' in payload:
+                usage['enable_thinking'] = payload['enable_thinking']
+        content = choice['message'].get('content')
+        if choice['finish_reason'] != 'stop':
+            raise ModelResponseError('Chat completion did not finish normally', content, usage)
+        if not isinstance(content, str):
+            raise ModelResponseError('Chat content must be a JSON string', content, usage)
+        try:
+            plan = json.loads(content)
+        except json.JSONDecodeError as exc:
+            raise ModelResponseError(f'Invalid JSON at line {exc.lineno}, column {exc.colno}', content, usage) from exc
+        from model_contract import validate
+        try:
+            validate(plan, output_schema)
+        except ValueError as exc:
+            raise ModelResponseError(str(exc), plan, usage) from exc
+        return plan, usage
     text = "".join(c["text"] for item in completed.get("output", []) for c in item.get("content", []) if c.get("type") == "output_text")
     usage = completed.get("usage")
     if failed_http and usage is not None:
         usage["failed_http_statuses"] = failed_http
     return json.loads(text), usage
+
+
+def requirement_mappings(requirements, script, instances):
+    """Bind requirement commands to exact text in the final executed script."""
+    mappings = []
+    for index, requirement in enumerate(requirements, 1):
+        command = resolve_selectors(requirement['command'], instances)
+        commands = [command] if command in script and command else command.splitlines()
+        if not commands or any(not item.strip() or item not in script for item in commands):
+            raise ValueError(f'Requirement {index} command is absent from generated dofile: {command}')
+        for item in commands:
+            line = script[:script.index(item)].count('\n') + 1
+            mappings.append({'requirement': requirement['requirement'], 'dft_config': item,
+                             'config_ref': {'source': 'final_results/deliverables/final.dofile',
+                                            'locator': f'L{line}'}})
+    return mappings
 
 
 def execute(args):
@@ -262,22 +369,23 @@ def execute(args):
         return repair(source, target, started, deadline, generate, design_outline)
     specification = (source / "task_spec.md").read_text(encoding="utf-8")
     full_insertion = bool(task1_full_insertion(specification))
-    files = [str(p.relative_to(source)) for p in source.rglob("*") if p.is_file() and p.suffix in {".v", ".lib", ".ctl"}]
     modules, instances = design_outline(source)
+    requirements, uncovered = extract_task_constraints(specification, generate, max(1, deadline-time.monotonic()), target, design_context=instances) if full_insertion else (None, [])
+    files = [str(p.relative_to(source)) for p in sorted(source.rglob("*")) if p.is_file() and p.suffix in {".v", ".lib", ".ctl"}]
     guide = (Path(__file__).parent / "commands.md").read_text(encoding="utf-8")
+    guide += '\nRetrieved knowledge (source/confidence/scope retained):\n' + json.dumps(retrieve(specification), ensure_ascii=False, separators=(',', ':'))
     # Small supplied component definitions expose custom wrapper pins and CTL
     # interfaces; declarations alone omit the information needed to map them.
-    component_sources = {name: (source / name).read_text(encoding="utf-8") for name in files
-                         if Path(name).suffix in {".v", ".ctl"} and (source / name).stat().st_size <= 32768}
-    prompt = json.dumps({"task_spec": specification, "full_insertion": full_insertion, "limitations": limitations, "files": files, "module_declarations": modules, "hierarchical_instances": instances, "component_sources": component_sources, "tool_guide": guide}, ensure_ascii=False)
-    plan, usage = generate(prompt, max(1, deadline - time.monotonic()))
+    components = component_sources(source)
+    prompt = json.dumps({"task_spec": specification, "task_contract": requirements, "full_insertion": full_insertion, "limitations": limitations, "files": files, "module_declarations": modules, "hierarchical_instances": instances, "component_sources": components}, ensure_ascii=False, separators=(',', ':'))
+    plan, usage = generate(prompt, max(1, deadline - time.monotonic()), tool_guide=guide)
     (target / "model_plan.json").write_text(json.dumps({"plan": plan, "usage": usage}, ensure_ascii=False, indent=2), encoding="utf-8")
     run_dir = target / "runs/R1"
     script = generated_script(source, run_dir, resolve_selectors(plan["dofile"], instances))
     if deadline <= time.monotonic():
         raise TimeoutError("No budget remaining for Scan")
-    result = run_scan(script, run_dir, deadline - time.monotonic())
-    acceptance, artifacts, _ = inspect_run(run_dir, script, result, full_insertion=full_insertion, task_spec=specification, design_context=instances)
+    result = run_scan(script, run_dir, deadline - time.monotonic(), source=source)
+    acceptance, artifacts, _ = inspect_run(run_dir, script, result, full_insertion=full_insertion, task_spec=specification, design_context=instances, task_requirements=requirements, uncovered=uncovered, source=source)
     runs = [result]
     issue_resolutions = []
     changes = []
@@ -296,17 +404,17 @@ def execute(args):
                                         "tool_messages": "\n".join(line for line in artifacts[f"{old_id}.log"].splitlines()
                                                                    if any(tag in line for tag in ("CMD-0034", "WARNING", "ERROR")))[:20000],
                                         "report_excerpts": {name: text[:12000] for name, text in artifacts.items()
-                                                            if name.endswith(".rpt") and "CellNo" not in text}}
-        plan, repair_usage = generate(json.dumps(repair_input, ensure_ascii=False), deadline - time.monotonic())
+                                                            if name.endswith(".rpt")}}
+        plan, repair_usage = generate(json.dumps(repair_input, ensure_ascii=False, separators=(',', ':')), deadline - time.monotonic(), tool_guide=guide)
         run_id = f"R{len(runs) + 1}"
         (target / f"model_repair_{run_id}.json").write_text(json.dumps({"plan": plan, "usage": repair_usage}, ensure_ascii=False, indent=2), encoding="utf-8")
         run_dir = target / "runs" / run_id
         script = generated_script(source, run_dir, resolve_selectors(plan["dofile"], instances))
         change_id = f"F{len(changes) + 1}"
         changes.append(record_change(target, old_id, run_id, original_script, script, change_id))
-        result = run_scan(script, run_dir, max(0.001, deadline - time.monotonic()))
+        result = run_scan(script, run_dir, max(0.001, deadline - time.monotonic()), source=source)
         runs.append(result)
-        acceptance, artifacts, _ = inspect_run(run_dir, script, result, full_insertion=full_insertion, task_spec=specification, design_context=instances)
+        acceptance, artifacts, _ = inspect_run(run_dir, script, result, full_insertion=full_insertion, task_spec=specification, design_context=instances, task_requirements=requirements, uncovered=uncovered, source=source)
         new_lines = (run_dir / "acceptance.json").read_text(encoding="utf-8").splitlines()
         evidence = [(i, line) for i, line in enumerate(new_lines, 1) if '"accepted": true' in line]
         resolved = acceptance["accepted"]
@@ -325,18 +433,33 @@ def execute(args):
     missing = acceptance["missing_outputs"]
     success = acceptance["accepted"]
     mappings = []
-    for requirement in plan["requirements"]:
-        command = resolve_selectors(requirement["command"], instances)
-        # A requirement can cite several real statements that are not adjacent.
-        # Give each an exact source reference rather than inventing a continuous
-        # excerpt or rejecting a correct executed script for their grouping.
-        commands = [command] if command in script and command else command.splitlines()
-        if not commands or any(not item.strip() or item not in script for item in commands):
-            raise ValueError("Requirement command is absent from generated dofile")
-        for item in commands:
-            line = script[:script.index(item)].count("\n") + 1
-            mappings.append({"requirement": requirement["requirement"], "dft_config": item, "config_ref": {"source": "final_results/deliverables/final.dofile", "locator": f"L{line}"}})
     if success:
+        try:
+            mappings = requirement_mappings(plan['requirements'], script, instances)
+        except ValueError as exc:
+            if deadline - time.monotonic() <= 30:
+                raise
+            # The circuit already passed. Correct only the report's references,
+            # never re-run Scan or replace the accepted script for a quote typo.
+            count = len(plan['requirements'])
+            correction, correction_usage = generate(json.dumps({
+                'executed_dofile': script, 'requirements': plan['requirements'],
+                'citation_error': str(exc)}, ensure_ascii=False, separators=(',', ':')),
+                deadline - time.monotonic(),
+                'Correct requirement citations against the immutable executed_dofile. '
+                'Return one exact command substring for EVERY requirement, in the same order. '
+                'Copy the actual syntax, including braces and brackets; do not repair or paraphrase it. '
+                'For nonadjacent statements, separate exact quotations with newlines. '
+                'Return an empty string if the script does not implement that requirement. '
+                'Do not change the requirements or the script.',
+                output_schema=record({'commands': {'type': 'array', 'minItems': count,
+                                                   'maxItems': count, 'items': STRING}}))
+            (target / 'model_requirement_mapping.json').write_text(json.dumps({
+                'correction': correction, 'usage': correction_usage,
+                'original_error': str(exc)}, ensure_ascii=False, indent=2), encoding='utf-8')
+            corrected = [{**requirement, 'command': command}
+                         for requirement, command in zip(plan['requirements'], correction['commands'], strict=True)]
+            mappings = requirement_mappings(corrected, script, instances)
         publish_run(target, run_dir)
     decision = {
         "case_id": os.environ.get("CASE_ID", source.parent.name or source.name), "task": "task1", "final_run": run_id if success else None,
