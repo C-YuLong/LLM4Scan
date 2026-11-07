@@ -16,7 +16,16 @@ def main():
     output_args = parser.add_mutually_exclusive_group(required=True)
     output_args.add_argument("--output", help="New directory name under dev/results")
     output_args.add_argument("--output-dir", type=Path, help="New explicit directory for an organized local benchmark run")
-    parser.add_argument("--image", help="Run a built submission image without mounting workspace source")
+    runtime_args = parser.add_mutually_exclusive_group()
+    runtime_args.add_argument("--image", help="Run a built submission image without mounting workspace source")
+    runtime_args.add_argument('--runtime-image', default='localhost/scanscan:dev-runtime',
+                              help='Dependency image used with mounted workspace source')
+    parser.add_argument('--implementation', choices=('submission', 'ourmethod'), default='submission',
+                        help='Select the workspace implementation to run')
+    parser.add_argument('--verifier', choices=('legacy', 'direct_agent', 'guided_agent'),
+                        help='Ourmethod verifier selection')
+    parser.add_argument('--verification-mode', choices=('gate', 'shadow'),
+                        help='Ourmethod verification mode')
     parser.add_argument('--competition-api', action='store_true',
                         help='Disabled: the user authorizes gproxy only, not competition API credentials')
     parser.add_argument("--initial-plan", type=Path, help="Development-only replay: seed first response from a saved model plan; subsequent Luna calls remain live")
@@ -25,6 +34,10 @@ def main():
     args = parser.parse_args()
     if args.competition_api:
         parser.error('Only gproxy is authorized. Competition API credentials will not be read or used.')
+    if args.implementation != 'ourmethod' and (args.verifier or args.verification_mode):
+        parser.error('--verifier and --verification-mode require --implementation ourmethod')
+    if args.implementation == 'ourmethod' and (args.initial_plan or args.tool_dofile or args.netlist_edits):
+        parser.error('The replay and fixture modes currently support submission only')
     if args.netlist_edits and not args.tool_dofile:
         parser.error('--netlist-edits is only allowed for no-model fixture qualification')
     root = Path(__file__).resolve().parents[1]
@@ -57,12 +70,17 @@ def main():
         "wsl", "-d", "podman-machine-default", "-u", "user", "--", "podman", "run", "--rm", "-i",
         "-v", f"{linux(source)}:/input:ro",
         "-v", f"{linux(destination)}:{container_output}:rw",
-        "--entrypoint", "python3", args.image or "localhost/scanscan:dev-runtime",
+        "--entrypoint", "python3", args.image or args.runtime_image,
         "-c", bootstrap, "-input", "/input", "-output", container_output,
     ]
+    if args.verifier:
+        command += ['--verifier', args.verifier]
+    if args.verification_mode:
+        command += ['--verification-mode', args.verification_mode]
     if not args.image:
         mount_index = command.index("--entrypoint")
-        command[mount_index:mount_index] = ["-v", f"{linux(root / 'submission')}:/submission:ro",
+        implementation = 'Ourmethod' if args.implementation == 'ourmethod' else 'submission'
+        command[mount_index:mount_index] = ["-v", f"{linux(root / implementation)}:/submission:ro",
                                           '-v', f'{linux(root / "knowledge")}:/knowledge:ro']
     if args.initial_plan:
         saved = args.initial_plan.resolve(strict=True)

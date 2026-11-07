@@ -14,6 +14,33 @@ from dev import run_local
 
 
 class LocalApiAuthorizationTests(unittest.TestCase):
+    def test_ourmethod_uses_authorized_provider_and_forwards_verifier(self):
+        provider = {'base_url': 'https://gproxy.lin.pub/codex/v1',
+                    'env_key': 'CODEX_KEY', 'wire_api': 'responses'}
+        with patch.object(run_local.os, 'environ', {
+                'CODEX_HOME': 'D:/unused-config', 'CODEX_KEY': 'fake-gproxy-test-key'}), \
+                patch.object(Path, 'home', return_value=Path('D:/unused-user')), \
+                patch.object(sys, 'argv', ['run_local', '--output', 'unused-output',
+                    '--implementation', 'ourmethod', '--verifier', 'guided_agent',
+                    '--verification-mode', 'gate', '--runtime-image', 'local-test-runtime']), \
+                patch.object(Path, 'read_text', return_value=''), \
+                patch.object(run_local.tomllib, 'loads', return_value={
+                    'model_providers': {'gproxy': provider}}), \
+                patch.object(Path, 'is_dir', return_value=True), \
+                patch.object(Path, 'mkdir'), \
+                patch.object(run_local.subprocess, 'run') as launch:
+            launch.return_value.returncode = 0
+            self.assertEqual(run_local.main(), 0)
+        command = launch.call_args.args[0]
+        environment = json.loads(launch.call_args.kwargs['input'])
+        self.assertTrue(any(value.endswith('/Ourmethod:/submission:ro') for value in command))
+        self.assertEqual(command[command.index('--verifier') + 1], 'guided_agent')
+        self.assertEqual(command[command.index('--verification-mode') + 1], 'gate')
+        self.assertIn('local-test-runtime', command)
+        self.assertEqual(environment['LLM_BASE_URL'], provider['base_url'])
+        self.assertEqual(environment['LLM_MODEL'], 'gpt-5.6-luna')
+        self.assertNotIn('fake-gproxy-test-key', ' '.join(command))
+
     def test_rejects_other_credentials_before_read_or_launch(self):
         provider = {'base_url': 'https://gproxy.lin.pub/codex/v1',
                     'env_key': 'CODEX_KEY', 'wire_api': 'responses'}

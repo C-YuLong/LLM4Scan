@@ -1,5 +1,20 @@
 # ScanScan：Scan Insertion 智能体开发
 
+## 合并后的运行入口
+
+`main` 已合并 `development_zwy` 的 `Ourmethod/`。`submission/` 保留本地任务约束、网表修复与 EQY、诊断和验收增强；`Ourmethod/` 提供独立的 generator → Scan → Verify → 反馈修复流程，以及 direct/guided 模型核验。两套实现尚未统一运行时，默认仍使用 `submission/`。
+
+本机通过同一个仅限 gproxy/Luna 的启动器选择实现：
+
+```powershell
+python -X utf8 dev/run_local.py --case task_1/case4 --output new_submission_run
+python -X utf8 dev/run_local.py --implementation ourmethod --runtime-image localhost/scanscan:ourmethod --verifier guided_agent --verification-mode gate --case task_1/case4 --output new_ourmethod_run
+```
+
+`Ourmethod` 的模型核验目前仅支持 Task 1，需要其 [运行依赖](Ourmethod/README.md)，包括 Yosys、OpenSTA、tclint 和 pyslang；先按 [Dockerfile](Ourmethod/Dockerfile) 构建上述依赖镜像。`--runtime-image` 挂载当前源码，`--image` 则执行镜像内的冻结代码。配置默认使用 Responses；带 `deepseek_strict` 的示例不适用于 gproxy/Luna。模型核验保留 PASS、FAIL、UNKNOWN；单项通过不代表全任务通过。实验记录和完整结果留在本地 `dev/results/`，不纳入仓库。
+
+本次 [合并实验](dev/分支合并实验_20261107.md)：Luna 下原有实现的 T1/C4、T2/C1 均通过独立验收；同一 T1/C4 的 Ourmethod guided、direct 候选通过 6 项结构检查，但全任务核验均为 UNKNOWN，未发布。guided 未在预算内核验完全部要求，direct 最终引用行号无效；不据此宣称新核验器已完成整例交付。
+
 当前授权限制：用户已明确允许项目开发和测试直接调用 gproxy，无需逐次确认；测试模型仍按此前要求使用 Luna，百炼及其他 Key 仍禁止读取或使用。本地启动器已恢复仅限 gproxy 的入口，在读取 Key 前核对地址、协议及凭据变量名，不会自动切换服务。官方公开平台仍禁止其他模型，并会忽略自定义 URL/model，所以本地调用授权不代表可以上传 Luna 或把 gproxy Key 发往百炼；凭据打包及平台登录入口保持阻断。下文提交、充值及其他外部 API 验证等历史流程不是当前执行授权。详见 [AGENTS.md](AGENTS.md)。
 
 历史 demo-rc4 已交付 11 个公开案例的本地端到端 Demo，按《Scan_Insertion竞赛冲冠实现方案.md》开发；不是当前版本正式模型的通过成绩。
