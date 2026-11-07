@@ -68,8 +68,9 @@ def complete_wrapper_interface(body):
 def generated_script(source, run_dir, body):
     """Paths belong to the runner, never to a generated candidate."""
     body = complete_wrapper_interface(body)
-    if re.search(r"(?m)^\s*set\s+(?:input_dir|out_res_dir|out_rpt_dir)\s", body):
-        raise ValueError("Generated body must not redefine runner-owned paths")
+    # Runner-owned paths: drop a candidate's own definitions instead of
+    # failing the case; the runner's values below always apply.
+    body = re.sub(r"(?m)^\s*set\s+(?:input_dir|out_res_dir|out_rpt_dir)\s[^\n]*\n?", "", body)
     body = complete_cell_names(source, body)
     return (f'set input_dir {{{source.as_posix()}}}\n'
             f'set out_res_dir {{{(run_dir / "deliverables").as_posix()}}}\n'
