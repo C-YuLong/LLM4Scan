@@ -49,8 +49,25 @@ def complete_cell_names(source, body):
                   lambda m: m[1] + expand(m[2]) + m[3] + expand(m[4]), body)
 
 
+_WRAPPER_ROLES = ("shift_clk", "capture_en", "shift_en", "cti", "cto", "cfi", "cfo")
+
+
+def complete_wrapper_interface(body):
+    """add_dedicated_wrapper_cell_type -interface needs 7 (role pin polarity)
+    triples (COM-3015: exactly 21 elements). Expand role/pin pairs with the
+    documented default polarity h."""
+    def expand(match):
+        tokens = match[2].replace("\\\n", " ").split()
+        if len(tokens) == 14 and set(tokens[0::2]) == set(_WRAPPER_ROLES):
+            tokens = [t for i in range(0, 14, 2) for t in (tokens[i], tokens[i + 1], "h")]
+            return match[1] + "{" + " ".join(tokens) + "}"
+        return match[0]
+    return re.sub(r"(add_dedicated_wrapper_cell_type\b[^\n{]*?(?:\\\n[^\n{]*?)*-interface\s+)\{([^}]*)\}", expand, body)
+
+
 def generated_script(source, run_dir, body):
     """Paths belong to the runner, never to a generated candidate."""
+    body = complete_wrapper_interface(body)
     if re.search(r"(?m)^\s*set\s+(?:input_dir|out_res_dir|out_rpt_dir)\s", body):
         raise ValueError("Generated body must not redefine runner-owned paths")
     body = complete_cell_names(source, body)
