@@ -18,10 +18,42 @@ def resolve_selectors(text, instances):
     return re.sub(r"\[\[H\d+\]\]", lambda match: paths[match[0]], text)
 
 
+_LIB_CELLS = {}
+
+
+def _library_cells(source):
+    key = str(source)
+    if key not in _LIB_CELLS:
+        cells = set()
+        for lib in Path(source).rglob("*.lib"):
+            try:
+                cells.update(re.findall(r'\bcell\s*\(\s*"?([A-Za-z_][\w$]*)"?\s*\)', lib.read_text(encoding="utf-8", errors="replace")))
+            except OSError:
+                pass
+        _LIB_CELLS[key] = cells
+    return _LIB_CELLS[key]
+
+
+def complete_cell_names(source, body):
+    """Expand a suffix-only cell name in set_scan_cell_mapping to the one
+    supplied Liberty cell ending with __SUFFIX (COM-3008 otherwise)."""
+    if "set_scan_cell_mapping" not in body:
+        return body
+    cells = _library_cells(source)
+    def expand(token):
+        if not cells or token in cells:
+            return token
+        matches = [cell for cell in cells if cell.endswith("__" + token)]
+        return matches[0] if len(matches) == 1 else token
+    return re.sub(r"(?m)^(\s*set_scan_cell_mapping\s+)(\S+)(\s+)(\S+)",
+                  lambda m: m[1] + expand(m[2]) + m[3] + expand(m[4]), body)
+
+
 def generated_script(source, run_dir, body):
     """Paths belong to the runner, never to a generated candidate."""
     if re.search(r"(?m)^\s*set\s+(?:input_dir|out_res_dir|out_rpt_dir)\s", body):
         raise ValueError("Generated body must not redefine runner-owned paths")
+    body = complete_cell_names(source, body)
     return (f'set input_dir {{{source.as_posix()}}}\n'
             f'set out_res_dir {{{(run_dir / "deliverables").as_posix()}}}\n'
             f'set out_rpt_dir {{{(run_dir / "reports").as_posix()}}}\n' + with_evidence_reports(normalize_booleans(body)))
