@@ -38,7 +38,6 @@ EVIDENCE_REPORTS = (
     (None, r"rpt_insertion_info\b", 'rpt_insertion_info -file "$out_rpt_dir/auto_insertion_info.rpt"'),
     (r"set_scan_element\b", r"rpt_scan_element\b[^\n]*-type\s+all\b",
      'rpt_scan_element -type all -file "$out_rpt_dir/auto_scan_element.rpt"'),
-    (r"add_pseudo_pi\b", r"rpt_pseudo_pi\b", 'rpt_pseudo_pi -file "$out_rpt_dir/auto_pseudo_pi.rpt"'),
     (r"add_scan_partition\b", r"rpt_scan_partition\b", 'rpt_scan_partition -file "$out_rpt_dir/auto_scan_partition.rpt"'),
     (r"set_shift_register\b", r"rpt_shift_register\b", 'rpt_shift_register -file "$out_rpt_dir/auto_shift_register.rpt"'),
     (r"set_wrapper_cfg\b", r"rpt_wrapper_cfg\b", 'rpt_wrapper_cfg -file "$out_rpt_dir/auto_wrapper_cfg.rpt"'),

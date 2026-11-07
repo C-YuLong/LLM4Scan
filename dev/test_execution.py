@@ -29,7 +29,7 @@ class EvidenceReportTests(unittest.TestCase):
         added = out[len(body) - len('exit\n'):-len('exit\n')]
         self.assertTrue(out.endswith('exit\n'))
         self.assertIn('rpt_scan_element -type all', added)
-        self.assertIn('rpt_pseudo_pi', added)
+        self.assertNotIn('rpt_pseudo_pi', added)  # unverified after insertion on large designs
         self.assertNotIn('rpt_scan_chain -file', added)
         self.assertNotIn('rpt_wrapper_cfg', added)
         self.assertEqual(with_evidence_reports(out), out)
@@ -59,7 +59,7 @@ class ExecutionTests(unittest.TestCase):
                         patch.object(scan_agent, 'run_scan', side_effect=run) as runner, \
                         patch.object(scan_agent, 'design_outline', return_value=([], [])), \
                         patch.object(scan_agent, 'inspect_run', return_value=({'accepted': True, 'missing_outputs': [], 'checks': {}}, {}, [])):
-                    self.assertEqual(scan_agent.main(), 0 if corrected else 1)
+                    self.assertEqual(scan_agent.main(), 0)  # an accepted circuit is never lost to a citation typo
                 self.assertEqual(runner.call_count, 1)
                 self.assertEqual(model.call_count, 2)
                 self.assertTrue((target / 'model_requirement_mapping.json').is_file())
@@ -69,7 +69,8 @@ class ExecutionTests(unittest.TestCase):
                     decision = json.loads((target / 'decision_log.json').read_text(encoding='utf-8'))
                     self.assertEqual(decision['requirement_mapping'][0]['dft_config'], line)
                 else:
-                    self.assertFalse((target / 'final_results').exists())
+                    self.assertTrue((target / 'final_results').exists())
+                    self.assertTrue((target / 'unmapped_requirements.json').is_file())
 
     def test_task1_semantic_failure_retries_completed_tool_run(self):
         with tempfile.TemporaryDirectory() as folder:

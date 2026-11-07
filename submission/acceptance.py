@@ -193,6 +193,17 @@ def merge_task_constraints(spec, extracted, *, design_context=()):
         # The existing single correction must see all invalid items, not just
         # the first one and then fail again on an unrelated later item.
         raise ValueError("\n".join(errors))
+    # Deterministic membership rules the model may omit or invert: a sentence
+    # naming backticked instance paths with a clear (non-)membership phrase.
+    for line in spec.splitlines():
+        if not re.search(r"扫描链|串链|不可扫描|non-?scan", line, re.I):
+            continue
+        for selector in dict.fromkeys(re.findall(r"`([A-Za-z_][\w$]*(?:/[\w$\[\]*]+)+)`", line)):
+            value = membership_polarity(line, selector)
+            if value is None or any(rule["target"] == selector for rule in req["scan_membership"]):
+                continue
+            req["scan_membership"].append({"target": selector, "value": value, "task_quote": line,
+                                           "source": "deterministic_sentence_parser"})
     return req
 
 
@@ -294,9 +305,10 @@ def extract_task_constraints(spec, generate, timeout, target, *, design_context=
     if design_context:
         context['hierarchy_objects'] = [{key: item[key] for key in ('selector', 'path', 'type')} for item in design_context]
     deadline, prompt, attempts = time.monotonic() + timeout, json.dumps(context, ensure_ascii=False, separators=(',', ':')), []
+    short = timeout <= 240
     path = target / "task_contract.json"
     for attempt in range(2):
-        shape_error = None
+        shape_error, extracted, merge_error = None, None, None
         try:
             raw, usage = generate(prompt, max(1, deadline-time.monotonic()), instruction, output_schema=TASK_CONSTRAINTS)
         except ModelResponseError as exc:
@@ -323,10 +335,21 @@ def extract_task_constraints(spec, generate, timeout, target, *, design_context=
                     extracted[field].append({"quote": quote, **{k: item[k] for k in ("kind", "target", "value")}}
                                             if field == "constraints" else quote)
             record["extraction"] = extracted
+            merge_error = None
             try:
                 requirements = merge_task_constraints(spec, extracted, design_context=design_context)
             except ValueError as exc:
+                merge_error = exc
                 extraction_errors.append(str(exc))
+            if extraction_errors and merge_error is not None and len(extraction_errors) == 1:
+                # Invented output filenames are the common invalid item; they
+                # are not task facts, so drop them now instead of paying a
+                # correction round. Any other invalid item still gets one.
+                lines = str(merge_error).splitlines()
+                if lines and all(re.match(r"constraints\[\d+\] \(output_file,", line) for line in lines) \
+                        and _drop_invalid_constraints(spec, extracted, merge_error, design_context, record):
+                    path.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
+                    return record["requirements"], record["extraction"]["uncovered"]
             if extraction_errors:
                 raise ValueError("\n".join(extraction_errors))
         except ValueError as exc:
@@ -334,14 +357,51 @@ def extract_task_constraints(spec, generate, timeout, target, *, design_context=
             # repeat Scan, or extend the original case deadline for this repair.
             attempts[-1]["validation_error"] = str(exc)
             path.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
-            if attempt or deadline-time.monotonic() <= 30:
-                raise
+            # A correction costs a full model call; on short case deadlines it
+            # has repeatedly consumed the time needed for the actual repair.
+            if attempt or short or deadline-time.monotonic() <= 30:
+                salvaged = shape_error is None and _drop_invalid_constraints(
+                    spec, extracted, merge_error, design_context, record)
+                if not salvaged:
+                    # Never fail the whole case on extraction: keep only the
+                    # deterministic parser's requirements and say so.
+                    record.update(extraction={"constraints": [], "uncovered": []},
+                                  requirements=merge_task_constraints(spec, {"constraints": [], "uncovered": []},
+                                                                      design_context=design_context),
+                                  fallback="model extraction invalid; deterministic parser requirements only")
+                path.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
+                return record["requirements"], record["extraction"]["uncovered"]
             prompt = json.dumps({**context, "invalid_extraction": raw, "validation_error": str(exc),
                 "request": "Correct every listed invalid item. Omit only constraints already enforced by the displayed parser; put other unsupported explicit requirements in the top-level uncovered array."}, ensure_ascii=False, separators=(',', ':'))
             continue
         record["requirements"] = requirements
         path.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
         return requirements, extracted["uncovered"]
+
+
+def _drop_invalid_constraints(spec, extracted, merge_error, design_context, record):
+    """After the single correction, keep the valid constraints instead of
+    failing the whole case.  Each rejected item is still validated (never
+    accepted with relaxed rules); its cited task text moves to uncovered so the
+    plan and verification still see that requirement.  Unindexed errors stay fatal."""
+    if merge_error is None:
+        bad = set()
+    else:
+        lines = str(merge_error).splitlines()
+        bad = {int(m[1]) for m in (re.match(r"constraints\[(\d+)\] ", line) for line in lines) if m}
+        if not bad or any(not re.match(r"constraints\[\d+\] ", line) for line in lines):
+            return False
+    kept = [item for i, item in enumerate(extracted["constraints"]) if i not in bad]
+    dropped = [item for i, item in enumerate(extracted["constraints"]) if i in bad]
+    uncovered = list(extracted["uncovered"]) + [item["quote"] for item in dropped if item["quote"] not in extracted["uncovered"]]
+    salvage = {"constraints": kept, "uncovered": uncovered}
+    try:
+        requirements = merge_task_constraints(spec, salvage, design_context=design_context)
+    except ValueError:
+        return False
+    record.update(extraction=salvage, requirements=requirements,
+                  dropped_constraints=[{**item, "reason": "invalid after correction; cited text kept as uncovered"} for item in dropped])
+    return True
 
 
 def _task_requirements(task_spec):

@@ -1,3 +1,4 @@
+import re
 """Required JSON fields for the model's existing script/evidence contracts."""
 
 
@@ -92,3 +93,22 @@ def verification(issues):
         "all_requirements_met": BOOL, "summary": STRING,
         "issues": record(findings),
     })
+
+
+def prune_invalid_items(plan, schema, limit=10):
+    """Drop top-level array items that violate the schema, e.g. one diagnosis
+    with an invalid enum, so a short-deadline case can still run the valid
+    remainder. Returns (plan, dropped) or raises the first non-item error."""
+    import copy
+    plan, dropped = copy.deepcopy(plan), []
+    for _ in range(limit):
+        try:
+            validate(plan, schema)
+            return plan, dropped
+        except ValueError as exc:
+            match = re.match(r"^\$\.(\w+)\[(\d+)\]", str(exc))
+            if not match or not isinstance(plan.get(match[1]), list) or int(match[2]) >= len(plan[match[1]]):
+                raise
+            dropped.append({"field": match[1], "item": plan[match[1]].pop(int(match[2])), "error": str(exc)})
+    validate(plan, schema)
+    return plan, dropped

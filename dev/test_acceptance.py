@@ -19,6 +19,19 @@ def requirements(case):
 
 
 class AcceptanceTests(unittest.TestCase):
+    def test_second_invalid_extraction_keeps_valid_constraints(self):
+        spec = 'L1\n`u_a` 不参与扫描链。\n输出插链后网表'
+        bad = {'line_start': 3, 'line_end': 3, 'kind': 'output_file', 'target': '', 'value': 'made_up.v'}
+        good = {'line_start': 2, 'line_end': 2, 'kind': 'scan_membership', 'target': 'u_a', 'value': 'exclude'}
+        reply = ({'constraints': [good, bad], 'uncovered': []}, {'input_tokens': 1, 'output_tokens': 1, 'total_tokens': 2})
+        with tempfile.TemporaryDirectory() as folder:
+            req, uncovered = extract_task_constraints(spec, lambda *a, **k: reply, 300, Path(folder))
+            record = json.loads((Path(folder) / 'task_contract.json').read_text(encoding='utf-8'))
+        self.assertEqual([(r['target'], r['value']) for r in req['scan_membership']], [('u_a', 'exclude')])
+        self.assertEqual(req['outputs'], [])
+        self.assertIn('输出插链后网表', uncovered)
+        self.assertEqual([d['value'] for d in record['dropped_constraints']], ['made_up.v'])
+
     def test_membership_exception_polarity_is_checked_against_cited_sentence(self):
         spec = '对 Hinstance：`top/u_a` 下的所有可扫描单元，除了 `top/u_a/keep*` 可匹配到的扫描单元，其余均不允许参与扫描链串链。'
         def extracted(outer, inner):
@@ -168,7 +181,7 @@ class AcceptanceTests(unittest.TestCase):
             self.assertIn('invalid kind', prompt)
             return {'constraints': [], 'uncovered': []}, {'input_tokens': 1, 'output_tokens': 1, 'total_tokens': 2}
         with tempfile.TemporaryDirectory() as folder:
-            req, _ = extract_task_constraints(spec, extract, 120, Path(folder))
+            req, _ = extract_task_constraints(spec, extract, 600, Path(folder))
             self.assertEqual(req['chain_count'], 4)
             self.assertTrue(req['drc_zero'])
             record = json.loads((Path(folder) / 'task_contract.json').read_text(encoding='utf-8'))
@@ -280,7 +293,7 @@ class AcceptanceTests(unittest.TestCase):
             return {"constraints": [{"line_start": 1, "line_end": 1, "kind": "drc_zero", "target": "", "value": "true"}],
                     "uncovered": [{"line_start": 9 if len(calls) == 1 else 2, "line_end": 9 if len(calls) == 1 else 2}]}, {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}
         with tempfile.TemporaryDirectory() as directory:
-            req, uncovered = extract_task_constraints(spec, extract, 120, Path(directory))
+            req, uncovered = extract_task_constraints(spec, extract, 600, Path(directory))
             self.assertTrue(req["drc_zero"])
             self.assertEqual(len(calls), 2)
             self.assertTrue(calls[1].startswith(calls[0][:-1]))
@@ -303,13 +316,16 @@ class AcceptanceTests(unittest.TestCase):
             self.assertIn('do not specify an internal_clocks policy', prompt)
             return {'constraints': [], 'uncovered': [{'line_start': 2, 'line_end': 2}]}, {}
         with tempfile.TemporaryDirectory() as folder:
-            req, uncovered = extract_task_constraints(spec, mixed_errors, 120, Path(folder))
+            req, uncovered = extract_task_constraints(spec, mixed_errors, 600, Path(folder))
             self.assertNotIn('internal_clocks', req['config'])
             self.assertEqual(uncovered, ['必须输出全部日志。'])
             self.assertEqual(len(calls), 2)
             calls.clear()
-            with self.assertRaises(ValueError):
-                extract_task_constraints(spec, extract, 10, Path(folder))
+            # No time for a correction: keep the valid constraints, skip the
+            # invalid uncovered range, and do not call the model again.
+            req, uncovered = extract_task_constraints(spec, extract, 10, Path(folder))
+            self.assertTrue(req['drc_zero'])
+            self.assertEqual(uncovered, [])
             self.assertEqual(len(calls), 1)
 
     def test_signal_polarity_is_not_confused_with_inactive_level(self):

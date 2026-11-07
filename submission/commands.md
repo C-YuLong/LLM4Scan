@@ -210,6 +210,12 @@ not a requirement that same-edge/same-clock chains contain extra lockup cells.
 
 Partition and cascaded-clock flows (manual PDF pages 17, 44–47;
 clock_gating_init_cycles syntax additionally confirmed in official development examples):
+Create custom partitions ONLY when the task explicitly names partitions or
+requires per-partition settings. "Do not cross clock domains" and independent
+pseudo-PI clock domains are already satisfied by the default -mix_clocks false,
+which splits chains by clock in Default_Partition. Observed: one custom partition
+per clock on a ~600k-cell design made dump_ctl run for over an hour (stuck in CTL
+scan-cell lookup) after a normal insertion, exhausting the case deadline.
 add_scan_partition NAME -clocks {SOURCE_CLOCK}
 Default_Partition is a PREDEFINED reserved partition containing the design's
 instances, not a user partition to create. Never add/delete/redefine it.

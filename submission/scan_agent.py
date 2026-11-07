@@ -76,10 +76,41 @@ def main():
                 for result in [json.loads(path.read_text(encoding="utf-8"))]
             ]
             decision_path.write_text(json.dumps(decision, ensure_ascii=False, indent=2), encoding="utf-8")
+            if isinstance(exc, (TimeoutError, ModelResponseError, OSError)) and \
+                    _publish_accepted_on_timeout(target, decision, decision_path):
+                print(json.dumps({"execution_complete": True, "model_verification": "incomplete", "failure_type": type(exc).__name__}))
+                return 0
         print(json.dumps({"execution_complete": False, "failure_type": type(exc).__name__}))
         return 1
     finally:
         signal.setitimer(signal.ITIMER_REAL, 0)
+
+
+def _publish_accepted_on_timeout(target, decision, decision_path):
+    """The case deadline expired after a completed round already passed every
+    program acceptance check (typically while the model verification call was
+    still running).  Deliver that round rather than nothing, and say plainly
+    that model verification did not finish.  A round with any failed program
+    check is never published here."""
+    accepted = []
+    for path in sorted((target / "runs").glob("R*/acceptance.json"), key=lambda p: int(p.parent.name[1:])):
+        value = json.loads(path.read_text(encoding="utf-8"))
+        checks = value.get("checks", {})
+        execution = path.parent / "execution.json"
+        if (value.get("accepted") is True and checks and all(v is True for v in checks.values())
+                and execution.is_file() and json.loads(execution.read_text(encoding="utf-8")).get("exit_status") == "completed"):
+            accepted.append(path.parent)
+    if not accepted or (target / "final_results").exists():
+        return False
+    run = accepted[-1]
+    publish_run(target, run)
+    decision.update({
+        "final_run": run.name,
+        "summary": f"{run.name} 通过全部程序验收；总时限在模型核验完成前到期，模型核验未完成。非完整语义证明。",
+        "model_verification": "incomplete_deadline",
+    })
+    decision_path.write_text(json.dumps(decision, ensure_ascii=False, indent=2), encoding="utf-8")
+    return True
 
 
 def arm_deadline(limitations, started):
@@ -341,13 +372,20 @@ def generate(prompt, timeout, instructions=None, output_schema=TASK1, *, tool_gu
     return json.loads(text), usage
 
 
-def requirement_mappings(requirements, script, instances):
-    """Bind requirement commands to exact text in the final executed script."""
+def requirement_mappings(requirements, script, instances, *, unmatched=None):
+    """Bind requirement commands to exact text in the final executed script.
+
+    With an ``unmatched`` list, citations absent from the script are recorded
+    there and skipped instead of failing an already accepted circuit."""
     mappings = []
     for index, requirement in enumerate(requirements, 1):
         command = resolve_selectors(requirement['command'], instances)
         commands = [command] if command in script and command else command.splitlines()
         if not commands or any(not item.strip() or item not in script for item in commands):
+            if unmatched is not None:
+                unmatched.append({'requirement': requirement['requirement'], 'command': command,
+                                  'reason': 'citation absent from executed dofile; not mapped'})
+                continue
             raise ValueError(f'Requirement {index} command is absent from generated dofile: {command}')
         for item in commands:
             line = script[:script.index(item)].count('\n') + 1
@@ -355,6 +393,30 @@ def requirement_mappings(requirements, script, instances):
                              'config_ref': {'source': 'final_results/deliverables/final.dofile',
                                             'locator': f'L{line}'}})
     return mappings
+
+
+def _corrected_mappings(target, plan, script, instances, deadline, exc, unmatched):
+    # The circuit already passed. Correct only the report's references,
+    # never re-run Scan or replace the accepted script for a quote typo.
+    count = len(plan['requirements'])
+    correction, correction_usage = generate(json.dumps({
+        'executed_dofile': script, 'requirements': plan['requirements'],
+        'citation_error': str(exc)}, ensure_ascii=False, separators=(',', ':')),
+        deadline - time.monotonic(),
+        'Correct requirement citations against the immutable executed_dofile. '
+        'Return one exact command substring for EVERY requirement, in the same order. '
+        'Copy the actual syntax, including braces and brackets; do not repair or paraphrase it. '
+        'For nonadjacent statements, separate exact quotations with newlines. '
+        'Return an empty string if the script does not implement that requirement. '
+        'Do not change the requirements or the script.',
+        output_schema=record({'commands': {'type': 'array', 'minItems': count,
+                                           'maxItems': count, 'items': STRING}}))
+    (target / 'model_requirement_mapping.json').write_text(json.dumps({
+        'correction': correction, 'usage': correction_usage,
+        'original_error': str(exc)}, ensure_ascii=False, indent=2), encoding='utf-8')
+    corrected = [{**requirement, 'command': command}
+                 for requirement, command in zip(plan['requirements'], correction['commands'], strict=True)]
+    return requirement_mappings(corrected, script, instances, unmatched=unmatched)
 
 
 def execute(args):
@@ -437,29 +499,17 @@ def execute(args):
         try:
             mappings = requirement_mappings(plan['requirements'], script, instances)
         except ValueError as exc:
-            if deadline - time.monotonic() <= 30:
-                raise
-            # The circuit already passed. Correct only the report's references,
-            # never re-run Scan or replace the accepted script for a quote typo.
-            count = len(plan['requirements'])
-            correction, correction_usage = generate(json.dumps({
-                'executed_dofile': script, 'requirements': plan['requirements'],
-                'citation_error': str(exc)}, ensure_ascii=False, separators=(',', ':')),
-                deadline - time.monotonic(),
-                'Correct requirement citations against the immutable executed_dofile. '
-                'Return one exact command substring for EVERY requirement, in the same order. '
-                'Copy the actual syntax, including braces and brackets; do not repair or paraphrase it. '
-                'For nonadjacent statements, separate exact quotations with newlines. '
-                'Return an empty string if the script does not implement that requirement. '
-                'Do not change the requirements or the script.',
-                output_schema=record({'commands': {'type': 'array', 'minItems': count,
-                                                   'maxItems': count, 'items': STRING}}))
-            (target / 'model_requirement_mapping.json').write_text(json.dumps({
-                'correction': correction, 'usage': correction_usage,
-                'original_error': str(exc)}, ensure_ascii=False, indent=2), encoding='utf-8')
-            corrected = [{**requirement, 'command': command}
-                         for requirement, command in zip(plan['requirements'], correction['commands'], strict=True)]
-            mappings = requirement_mappings(corrected, script, instances)
+            unmatched = []
+            if deadline - time.monotonic() <= 45:
+                mappings = requirement_mappings(plan['requirements'], script, instances, unmatched=unmatched)
+            else:
+                try:
+                    mappings = _corrected_mappings(target, plan, script, instances, deadline, exc, unmatched)
+                except (ValueError, ModelResponseError, OSError):
+                    unmatched.clear()
+                    mappings = requirement_mappings(plan['requirements'], script, instances, unmatched=unmatched)
+            if unmatched:
+                (target / 'unmapped_requirements.json').write_text(json.dumps(unmatched, ensure_ascii=False, indent=2), encoding='utf-8')
         publish_run(target, run_dir)
     decision = {
         "case_id": os.environ.get("CASE_ID", source.parent.name or source.name), "task": "task1", "final_run": run_id if success else None,
