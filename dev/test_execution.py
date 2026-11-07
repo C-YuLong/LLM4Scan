@@ -20,6 +20,14 @@ import time
 
 @unittest.skipUnless(os.name == "posix", "Submission runs inside the Linux image")
 
+
+class PartitionPolicyTests(unittest.TestCase):
+    def test_unrequested_partitions_counted_only_when_task_has_none(self):
+        body = 'add_scan_partition P1 -clocks {a}\nadd_scan_partition P2 -clocks {b}\n'
+        self.assertEqual(scan_agent.unrequested_partitions('扫描链不得跨时钟域', body), 2)
+        self.assertEqual(scan_agent.unrequested_partitions('| 分区 | chain_count |', body), 0)
+        self.assertEqual(scan_agent.unrequested_partitions('no partitions here', 'insert_dft_logic'), 0)
+
 class EvidenceReportTests(unittest.TestCase):
     def test_missing_evidence_reports_are_added_before_exit_only_for_insertion(self):
         from scan_runner import with_evidence_reports

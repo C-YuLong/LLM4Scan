@@ -374,6 +374,13 @@ def generate(prompt, timeout, instructions=None, output_schema=TASK1, *, tool_gu
     return json.loads(text), usage
 
 
+def unrequested_partitions(specification, dofile):
+    """Count custom partitions in a plan whose task never mentions partitions."""
+    if re.search(r"分区|partition", specification, re.I):
+        return 0
+    return len(re.findall(r"(?m)^\s*add_scan_partition\b", dofile))
+
+
 def requirement_mappings(requirements, script, instances, *, unmatched=None):
     """Bind requirement commands to exact text in the final executed script.
 
@@ -443,6 +450,25 @@ def execute(args):
     components = component_sources(source)
     prompt = json.dumps({"task_spec": specification, "task_contract": requirements, "full_insertion": full_insertion, "limitations": limitations, "files": files, "module_declarations": modules, "hierarchical_instances": instances, "component_sources": components}, ensure_ascii=False, separators=(',', ':'))
     plan, usage = generate(prompt, max(1, deadline - time.monotonic()), tool_guide=guide)
+    unrequested = unrequested_partitions(specification, plan["dofile"])
+    if unrequested and deadline - time.monotonic() > 600:
+        # Per-clock custom partitions on a large design hung dump_ctl for over
+        # an hour (T1/C5). Regenerate once before spending a Scan run on it.
+        first_plan = plan
+        plan, retry_usage = generate(json.dumps({**json.loads(prompt), "rejected_plan": {
+            "dofile": first_plan["dofile"],
+            "reason": ("The task does not request scan partitions, but this plan creates "
+                       f"{unrequested} custom partition(s). Keep every chain in Default_Partition: "
+                       "-mix_clocks false already separates clock domains, including pseudo-PI clocks. "
+                       "Remove add_scan_partition / set_current_scan_partition and per-partition loops; "
+                       "declare each scan enable once.")}}, ensure_ascii=False, separators=(',', ':')),
+            max(1, deadline - time.monotonic()), tool_guide=guide)
+        usage = {"initial": usage, "partition_regeneration": retry_usage,
+                 **{key: sum(u.get(key) or 0 for u in (usage, retry_usage) if isinstance(u, dict))
+                    for key in ("input_tokens", "output_tokens", "total_tokens")}}
+        plan.setdefault("repair", {"located_object": "", "root_cause": "", "action": ""})
+        (target / "model_plan_rejected_partitions.json").write_text(json.dumps(
+            {"plan": first_plan, "unrequested_partitions": unrequested}, ensure_ascii=False, indent=2), encoding="utf-8")
     (target / "model_plan.json").write_text(json.dumps({"plan": plan, "usage": usage}, ensure_ascii=False, indent=2), encoding="utf-8")
     run_dir = target / "runs/R1"
     script = generated_script(source, run_dir, resolve_selectors(plan["dofile"], instances))
