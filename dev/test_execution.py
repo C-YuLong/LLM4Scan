@@ -144,8 +144,8 @@ class ExecutionTests(unittest.TestCase):
             body = 'dump_netlist -file "$out_res_dir/post.v"'
             script = scan_runner.generated_script(root, run, body)
             for variable in ("input_dir", "out_res_dir", "out_rpt_dir"):
-                with self.assertRaises(ValueError):
-                    scan_runner.generated_script(root, run, f"set {variable} old_round\n" + body)
+                # A candidate's own path definition is dropped; runner paths win.
+                self.assertEqual(scan_runner.generated_script(root, run, f"set {variable} old_round\n" + body), script)
             result, _, _ = inspect_run(run, script, {"exit_status": "completed"}, full_insertion=False)
             self.assertTrue(result["accepted"])
             self.assertNotIn("reported_drc_zero", result["checks"])
