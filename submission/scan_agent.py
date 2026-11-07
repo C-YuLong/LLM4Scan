@@ -359,7 +359,9 @@ def generate(prompt, timeout, instructions=None, output_schema=TASK1, *, tool_gu
             plan = json.loads(content)
         except json.JSONDecodeError as exc:
             raise ModelResponseError(f'Invalid JSON at line {exc.lineno}, column {exc.colno}', content, usage) from exc
-        from model_contract import validate
+        from model_contract import validate, strip_extra_fields
+        if isinstance(plan, dict):
+            plan, _ = strip_extra_fields(plan, output_schema)
         try:
             validate(plan, output_schema)
         except ValueError as exc:

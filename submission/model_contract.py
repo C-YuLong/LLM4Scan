@@ -95,6 +95,31 @@ def verification(issues):
     })
 
 
+def _resolve_path(value, path):
+    for key, index in re.findall(r"\.(\w+)|\[(\d+)\]", path[1:]):
+        value = value[key] if key else value[int(index)]
+    return value
+
+
+def strip_extra_fields(plan, schema, limit=10):
+    """Remove fields the schema does not define (harmless model additions)."""
+    import copy
+    plan, stripped = copy.deepcopy(plan), []
+    for _ in range(limit):
+        try:
+            validate(plan, schema)
+            return plan, stripped
+        except ValueError as exc:
+            match = re.match(r"^(\$[^:]*): missing fields \[\]; extra fields \[(.*)\]$", str(exc))
+            if not match:
+                return plan, stripped
+            target = _resolve_path(plan, match[1])
+            for name in re.findall(r"'([^']+)'", match[2]):
+                target.pop(name, None)
+                stripped.append(match[1] + "." + name)
+    return plan, stripped
+
+
 def prune_invalid_items(plan, schema, limit=10):
     """Drop top-level array items that violate the schema, e.g. one diagnosis
     with an invalid enum, so a short-deadline case can still run the valid

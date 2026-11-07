@@ -10,7 +10,7 @@ import time
 
 from scan_runner import run_scan, generated_script, record_change, publish_run, resolve_selectors
 from acceptance import STAGES, inspect_run, extract_task_constraints
-from model_contract import TASK2, REPAIR, ModelResponseError, prune_invalid_items, verification as verification_schema
+from model_contract import TASK2, REPAIR, ModelResponseError, prune_invalid_items, strip_extra_fields, validate, verification as verification_schema
 from control_context import component_sources
 from netlist_repair import edited_netlists, repaired_script
 from knowledge_search import retrieve
@@ -526,7 +526,14 @@ def repair(source, target, started, deadline, generate, design_outline):
                                    output_schema=diagnosis_schema, tool_guide=guide)
         except ModelResponseError as exc:
             plan, usage, shape_error = exc.plan, exc.usage, exc
-            if isinstance(plan, dict) and deadline - time.monotonic() <= 75:
+            if isinstance(plan, dict):
+                plan, stripped = strip_extra_fields(plan, diagnosis_schema)
+                try:
+                    validate(plan, diagnosis_schema)
+                    shape_error = None
+                except ValueError:
+                    pass
+            if shape_error is not None and isinstance(plan, dict) and deadline - time.monotonic() <= 75:
                 # No time to regenerate: keep the valid items of this answer.
                 try:
                     plan, pruned_items = prune_invalid_items(plan, diagnosis_schema)
@@ -562,13 +569,15 @@ def repair(source, target, started, deadline, generate, design_outline):
             'diagnostic_attempts': diagnostic_attempts}, ensure_ascii=False, indent=2), encoding='utf-8')
         if not gaps and candidate_error is None:
             break
-        if (not attempt and shape_error is None and deadline - time.monotonic() <= 75
-                and not (candidate_error or '').replace('Diagnosis evidence rejected: ', '', 1).count('\n')
-                and (candidate_error is None or candidate_error.startswith('Diagnosis evidence rejected: '))):
+        script_valid = (shape_error is None
+                        and not (candidate_error or '').replace('Diagnosis evidence rejected: ', '', 1).count('\n')
+                        and (candidate_error is None or candidate_error.startswith('Diagnosis evidence rejected: ')))
+        if script_valid and (attempt or deadline - time.monotonic() <= 75):
             # No time for a correction plus R2 and its verification. The
             # script itself is valid; run it now. Rejected diagnoses stay
             # rejected and uncovered gaps stay recorded for verification.
-            diagnostic_attempts[-1]['correction_skipped'] = 'insufficient time before deadline'
+            diagnostic_attempts[-1]['correction_skipped'] = ('correction already used' if attempt
+                                                             else 'insufficient time before deadline')
             break
         if attempt or deadline-time.monotonic() <= 30:
             if shape_error is not None:
