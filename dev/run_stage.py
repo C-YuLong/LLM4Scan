@@ -134,6 +134,8 @@ def main():
     parser.add_argument("--competition-api", action="store_true", help="Pass through to run_local: use DashScope key from .env")
     parser.add_argument("--output-prefix", help="Unique prefix for per-case directories")
     parser.add_argument("--image", help="Use this built submission image for every case")
+    parser.add_argument('--provider', choices=('gproxy', 'deepseek'), default='gproxy',
+                        help='Use the selected authorized provider for every case')
     args = parser.parse_args()
     results = root / "dev" / "results"
     prefix = args.output_prefix or ("stage_" + datetime.now().strftime("%Y%m%d_%H%M%S"))
@@ -149,7 +151,7 @@ def main():
         raise SystemExit(str(exc))
     records = []
     def save_summary():
-        summary = {"prefix": prefix, "image": args.image, "cases": records,
+        summary = {"prefix": prefix, "image": args.image, "provider": args.provider, "cases": records,
                    "requested_cases": list(args.cases), "finished": len(records) == len(args.cases),
                    "failed_cases": [r["case"] for r in records if r["exit_code"] != 0 or
                                     r["independent_acceptance"].get("passed") is not True or
@@ -161,7 +163,8 @@ def main():
     for case, name in zip(args.cases, names):
         output = results / name
         started = time.monotonic()
-        command = [sys.executable, str(root / "dev" / "run_local.py"), "--case", case, "--output", name]
+        command = [sys.executable, str(root / "dev" / "run_local.py"), "--case", case,
+                   "--output", name, '--provider', args.provider]
         if args.image:
             command.extend(["--image", args.image])
         if args.competition_api:

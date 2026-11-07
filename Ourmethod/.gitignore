@@ -1,0 +1,10 @@
+# Local experiments, tests and generated data are not part of this core snapshot.
+evaluation/
+evaluations/
+tests/
+results/
+logs/
+__pycache__/
+*.py[cod]
+.env
+.env.*
