@@ -121,6 +121,9 @@ the required registers too. Verify actual chain membership in exported CTL.
 
 off_state means inactive level, not active level. scan_enable usage all controls both FF SE and ICG.
 For reset, active-high means off_state 0; active-low means off_state 1.
+Symptom: DFTR3 (Reset input of DFF is uncontrolled) on most FFs after a reset
+declaration means its off_state is the active level; for an active-low reset
+(the task says low-active, or the original/golden evidence shows off_state 1) use -off_state 1.
 When ORIGINAL DRC includes uncontrolled set/reset inputs (DFTR2/DFTR3), inspect
 the supplied Liberty clear/preset function and the actual upstream connection
 even if the task does not state a polarity. Do not repair only the simultaneous
