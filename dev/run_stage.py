@@ -27,6 +27,8 @@ def _tokens(result_dir):
         paths = [path for path in paths if path.name != "verification.json"]
     for path in paths:
         value = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(value, dict):
+            continue
         if path.name == 'decision_log.json' and value.get('failure_type') in {'HTTPError', 'TimeoutError'}:
             records.append({'file': path.name, 'unknown_usage_reason': 'Failed or interrupted run may have requests without returned usage',
                             'failure_type': value['failure_type'], 'http_status': value.get('http_status')})
