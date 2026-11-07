@@ -219,6 +219,24 @@ def merge_task_constraints(spec, extracted, *, design_context=()):
                 continue
             req["scan_membership"].append({"target": selector, "value": value, "task_quote": line,
                                            "source": "deterministic_sentence_parser"})
+    # A named functional domain excluded from chains without a literal path:
+    # resolve it only when its ASCII keywords select exactly one hierarchy.
+    generic = {"SCAN", "DFT", "FF", "SFF", "DFF", "CHAIN", "ICG", "RAM", "TOP", "CPU"}
+    for line in spec.splitlines():
+        if "`" in line and re.search(r"`[\w$]+(?:/[\w$\[\]*]+)+`", line):
+            continue
+        if not re.search(r"(?:不纳入|不参与|不允许参与|不得参与|排除出?)[^。；;\n]*扫描链", line):
+            continue
+        tokens = {w.lower() for w in re.findall(r"[A-Za-z][A-Za-z0-9]{2,}", line) if w.upper() not in generic}
+        if not tokens:
+            continue
+        matches = [item for item in design_context
+                   if all(t in item["path"].rsplit("/", 1)[-1].lower() for t in tokens)]
+        if len(matches) != 1 or any(rule["target"] == matches[0]["path"] for rule in req["scan_membership"]):
+            continue
+        req["scan_membership"].append({"target": matches[0]["path"], "value": "exclude", "task_quote": line,
+                                       "source_selector": matches[0]["selector"], "module_type": matches[0]["type"],
+                                       "source": "deterministic_domain_parser"})
     # A scan enable explicitly controlling both SFF shift/capture and ICGs
     # has usage all, whatever single usage a model extraction chose.
     for signal in req["signals"]:
